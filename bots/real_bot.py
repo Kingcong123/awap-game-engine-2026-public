@@ -21,6 +21,9 @@ class BotPlayer:
         self.invading = False
         self.state = 0
 
+        self.clean_plates = 0
+        self.dirty_plates = 0
+
     def get_bfs_path(self, controller: RobotController, start: Tuple[int, int], target_predicate) -> Optional[Tuple[int, int]]:
         queue = deque([(start, [])]) 
         visited = set([start])
@@ -88,4 +91,7 @@ class BotPlayer:
     def play_assembler_bot(self, bot_id):
 
     
-    def play_provider_bot(self, bot_id):
+    def play_provider_bot(self, controller, bot_id):
+        shop_x, shop_y = self.locations["SHOP"]
+        bot_state = controller.get_bot_state(bot_id)
+        bx, by = bot_state['x'], bot_state['y']
