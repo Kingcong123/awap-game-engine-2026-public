@@ -12,13 +12,20 @@ class BotPlayer:
     def __init__(self, map_copy):
         self.map = map_copy
         self.locations = locations.find_important_locations(self.map)
-        self.assembler_bot_id = None
-        self.provider_bot_id = None
 
+        self.boxes = [(-1, x, y) for (x,y) in locations["BOXES"]] #Food ID of what it is storing
+        self.cookers = [(False, False, x, y) for (x,y) in locations["COOKERS"]] #First boolean is if there is a pan there and second is if it is cooking
+        
+
+        self.assembler_bot_id = None
+        self.num_ingredients_assembled = 0
+
+        self.provider_bot_id = None
+        self.ingredients_processed_count = 0
+        
         self.bot_states = {}     # Tracks what each bot is doing
         self.current_order_target = None
-        self.ingredients_processed_count = 0
-
+        
         self.invading = False
         self.state = 0
 
@@ -121,8 +128,6 @@ class BotPlayer:
         
         # If we have finished all ingredients, go to Waiting Zone
         if self.ingredients_processed_count >= len(required_items):
-            wx, wy = locs["WAITING_ZONE"] if locs["WAITING_ZONE"] else (0,0)
-            self.move_towards(controller, bot_id, wx, wy)
             return
 
         # Get the specific ingredient we need right now
@@ -136,12 +141,8 @@ class BotPlayer:
 
         # --- STATE 0: Buy Ingredient ---
         if state == 0:
-            # If we already have it, skip to processing
-            if is_holding(target_name):
-                self.bot_states[bot_id] = 1
-                return
-
             # Go to Shop
+            sx, sy = self.locations["SHOP"]
             if self.move_towards(controller, bot_id, sx, sy):
                 # Check funds
                 if controller.get_team_money() >= target_enum.buy_cost:
@@ -158,6 +159,7 @@ class BotPlayer:
             item_name = target_name.upper()
 
             # ROUTE A: Needs Chopping (Meat, Onion) -> Go to Chop Counter
+
             if item_name in ["MEAT", "ONION", "ONIONS"]:
                 if self.move_towards(controller, bot_id, cx, cy):
                     # Place it on the counter to chop
