@@ -1,5 +1,5 @@
 import random
-from collections import deque
+from collections import deque, defaultdict
 from typing import Tuple, Optional, List
 
 from game_constants import Team, TileType, FoodType, ShopCosts
@@ -14,6 +14,17 @@ class BotPlayer:
         self.my_bot_id = None
         
         self.state = 0
+
+        self.tile_places = defaultdict(set()) # keys are tile names so "S", "K", "$" etc.
+    
+    def good_init(self):
+        rows = len(self.map)
+        cols = len(self.map[0])
+
+        for i in range(rows):
+            for j in range(cols):
+                if self.map[i][j] not in {"b", ".", "#"}:
+                    self.tile_places[self.map[i][j]].add((i, j))
 
     def get_bfs_path(self, controller: RobotController, start: Tuple[int, int], target_predicate) -> Optional[Tuple[int, int]]:
         queue = deque([(start, [])]) 
