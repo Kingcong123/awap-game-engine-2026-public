@@ -223,7 +223,7 @@ class BotPlayer:
 
 
     def play_provider_bot(self, controller, bot_id):
-        if True: # if starting state
+        if controller.get_turn() == 1: # if starting state
             self.get_pans(controller, bot_id)
     
     def get_pans(self, controller, bot_id):
