@@ -15,6 +15,9 @@ class BotPlayer:
         self.assembler_bot_id = None
         self.provider_bot_id = None
 
+        self.boxes = [(-1, x,y) for (x,y) in self.locations["BOXES"]]
+        self.cookers = [(False, False, x,y) for (x,y) in self.locations["COOKER"]]
+
         self.bot_states = {}     # Tracks what each bot is doing
         self.current_order_target = None
         self.ingredients_processed_count = 0
@@ -124,12 +127,16 @@ class BotPlayer:
         
         # If we have finished all ingredients, go to Waiting Zone
         if self.ingredients_processed_count >= len(required_items):
-            wx, wy = locs["WAITING_ZONE"] if locs["WAITING_ZONE"] else (0,0)
-            self.move_towards(controller, bot_id, wx, wy)
             return
 
         # Get the specific ingredient we need right now
-        target_name = required_items[self.ingredients_processed_count]
+        found_item = False
+        while(not found_item):
+            target_name = required_items[self.ingredients_processed_count]
+            if target_name in ["NOODLES", "EGG"]:
+                self.ingredients_processed_count += 1
+
+                
         target_enum = self.name_to_enum.get(target_name.upper())
         
         if not target_enum:
@@ -165,12 +172,7 @@ class BotPlayer:
             item_name = target_name.upper()
 
             # ROUTE A: Needs Chopping (Meat, Onion) -> Go to Chop Counter
-<<<<<<< HEAD
-            if item_name in ["MEAT", "ONION", "ONIONS"]:
-=======
-
-            if item_name in ["MEAT", "ONIONS"]:
->>>>>>> 8eedf4f (stuff)
+            if item_name in ["MEAT", "ONION"]:
                 if self.move_towards(controller, bot_id, cx, cy):
                     # Place it on the counter to chop
                     if controller.chop(bot_id, cx, cy):
