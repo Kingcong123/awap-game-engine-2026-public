@@ -237,3 +237,10 @@ class BotPlayer:
                     controller.buy(bot_id, "PANS", shop_x, shop_y)
                 else:
                     self.move_towards(controller, bot_id, shop_x, shop_y)
+            else:
+                stove_x, stove_y = self.find_nearest_tile(controller, bx, by, 'K')
+
+                if (abs(stove_x-bx) <= 1 and abs(stove_y-by) <= 1): # can access shop
+                    controller.stove(bot_id, "PANS", shop_x, shop_y)
+                else:
+                    self.move_towards(controller, bot_id, shop_x, shop_y)
