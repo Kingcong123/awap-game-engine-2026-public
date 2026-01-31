@@ -26,7 +26,7 @@ class BotPlayer:
         self.clean_plates = 0
         self.dirty_plates = 0
 
-        self.pans = 0
+        self.pans = len(self.cookers)
 
 
     def find_important_locations(self, map_instance):
