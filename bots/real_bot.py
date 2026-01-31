@@ -45,6 +45,7 @@ class BotPlayer:
 
         self.clean_plates = 0
         self.dirty_plates = 0
+        
 
     def get_bfs_path(self, controller: RobotController, start: Tuple[int, int], target_predicate) -> Optional[Tuple[int, int]]:
         
@@ -64,7 +65,7 @@ class BotPlayer:
                     if dx == 0 and dy == 0: continue
                     nx, ny = curr_x + dx, curr_y + dy
                     if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
-                        if controller.get_map().is_tile_walkable(nx, ny):
+                        if controller.get_map(controller.get_team).is_tile_walkable(nx, ny):
                             visited.add((nx, ny))
                             queue.append(((nx, ny), path + [(dx, dy)]))
         return None
@@ -84,7 +85,7 @@ class BotPlayer:
     def find_nearest_tile(self, controller: RobotController, bot_x: int, bot_y: int, tile_name: str) -> Optional[Tuple[int, int]]:
         best_dist = 9999
         best_pos = None
-        m = controller.get_map()
+        m = controller.get_map(controller.get_team)
         for x in range(m.width):
             for y in range(m.height):
                 tile = m.tiles[x][y]
@@ -102,7 +103,7 @@ class BotPlayer:
             self.order_id = 0 
         
         #See if the orders are still active and update accordingly
-        while len(self.orders) > self.order_id and self.orders[self.order_id]["expires_turn"] <= controller.get_turn(controller.get_team()): 
+        while len(self.orders) > self.order_id and self.orders[self.order_id]["expires_turn"] <= controller.get_turn(): 
             self.order_id += 1
         
         #Gone through all orders
@@ -113,15 +114,15 @@ class BotPlayer:
         if not my_bots: return
     
         self.provider_bot_id = my_bots[0]
-        provider_bot_id = self.my_bot_id
+        provider_bot_id = self.provider_bot_id
 
-        self.assembler_bot = my_bots[1]
-        assembly_bot_id = self.assembly_bot_id
+        self.assembler_bot_id = my_bots[1]
+        assembler_bot_id = self.assembler_bot_id
 
         if self.invading:
             ...
         else:
-            self.play_assembler_bot(assembly_bot_id, controller)
+            self.play_assembler_bot(assembler_bot_id, controller)
             self.play_provider_bot(provider_bot_id, controller)
         
     def play_assembler_bot(self, bot_id, controller: RobotController):
@@ -171,13 +172,6 @@ class BotPlayer:
         if not target_name:
             return
 
-        target_enum = self.name_to_enum.get(target_name.upper())
-        
-        if not target_enum:
-            # Skip invalid/unknown ingredients to prevent freezing
-            self.ingredients_processed_count += 1
-            return
-
         # --- STATE 0: Buy Ingredient ---
         if state == 0:
             if is_holding(target_name):
@@ -189,7 +183,7 @@ class BotPlayer:
                 return
 
             if self.move_towards(controller, bot_id, sx, sy):
-                if controller.get_team_money() >= target_enum.buy_cost:
+                if controller.get_team_money(controller.get_team) >= target_enum.buy_cost:
                     if controller.buy(bot_id, target_enum, sx, sy):
                         # State transition handled next turn by is_holding check
                         pass
