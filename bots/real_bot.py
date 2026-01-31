@@ -231,7 +231,7 @@ class BotPlayer:
             if not bot_state['holding']:
                 shop_x, shop_y = self.find_nearest_tile(controller, bx, by, '$')
 
-            if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
-                controller.wash_sink(bot_id, shop_x, shop_y)
-            else:
-                self.move_towards(controller, bot_id, sinkx, sinky)
+                if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
+                    controller.buy(bot_id, "PANS", shop_x, shop_y)
+                else:
+                    self.move_towards(controller, bot_id, shop_x, shop_y)
