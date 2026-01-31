@@ -124,19 +124,20 @@ class BotPlayer:
             return # Wait for game logic to pick an order
             
         required_items = self.current_order_target['required']
-        
+
+        # Get the specific ingredient we need right now
+        found_item = False
+        while(not found_item and self.ingredients_processed_count < len(required_items)):
+            target_name = required_items[self.ingredients_processed_count]
+            if target_name in ["NOODLES", "EGG"]:
+                self.ingredients_processed_count += 1
+            else:
+                found_item = True
+
         # If we have finished all ingredients, go to Waiting Zone
         if self.ingredients_processed_count >= len(required_items):
             return
 
-        # Get the specific ingredient we need right now
-        found_item = False
-        while(not found_item):
-            target_name = required_items[self.ingredients_processed_count]
-            if target_name in ["NOODLES", "EGG"]:
-                self.ingredients_processed_count += 1
-
-                
         target_enum = self.name_to_enum.get(target_name.upper())
         
         if not target_enum:
@@ -167,6 +168,7 @@ class BotPlayer:
             # Sanity Check: Did we lose the item?
             if not is_holding(target_name):
                 self.bot_states[bot_id] = 0 # Retry buy
+                self.ingredients_processed_count -= 1
                 return
 
             item_name = target_name.upper()
