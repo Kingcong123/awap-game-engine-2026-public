@@ -15,12 +15,17 @@ class BotPlayer:
         self.assembler_bot_id = None
         self.provider_bot_id = None
 
+        # The integer defines the ingredient that is currently stored in the box. Each box can store multiple of one ingredient
         self.boxes = [(-1, x,y) for (x,y) in self.locations["BOXES"]]
+
+        # First boolean is if a pan is there
+        # Second boolean is if it is cooking
         self.cookers = [(False, False, x,y) for (x,y) in self.locations["COOKER"]]
 
         self.bot_states = {}     # Tracks what each bot is doing
         self.current_order_target = None
         self.ingredients_processed_count = 0
+        self.provider_processed_count = 0
 
         self.invading = False
         self.state = 0
@@ -179,49 +184,18 @@ class BotPlayer:
                     # Place it on the counter to chop
                     if controller.chop(bot_id, cx, cy):
                         self.bot_states[bot_id] = 2
-                        if item_name in []
+                        if item_name == "ONION":
+                            self.bot_states[bot_id] = 4
+                        else:
+                            self.bot_states[bot_id] = 2
 
-            # ROUTE B: Needs Cooking Only (Egg) -> Go to Cooker
-            elif item_name == "EGG":
-                if self.move_towards(controller, bot_id, kx, ky):
-                    # Place on cooker (RobotController handles Pan check internally in place())
-                    if controller.place(bot_id, kx, ky):
-                        # Done! Egg is on the stove.
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
+        # --- STATE 2: Cook Item
+        elif state == 2:
+            if 
 
-            # ROUTE C: No Prep (Noodles, Sauce) -> Go to Assembly Counter
-            else:
-                if self.move_towards(controller, bot_id, ax, ay):
-                    if controller.place(bot_id, ax, ay):
-                        # Done! Item is ready for pickup.
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
-
-        # --- STATE 3: Pickup Chopped Item ---
-        elif state == 3:
-            if controller.pickup(bot_id, cx, cy):
-                self.bot_states[bot_id] = 4
-
-        # --- STATE 4: Deliver Chopped Item ---
+        # --- STATE 4: Deliver Chopped Item to boxes---
         elif state == 4:
-            # We are holding chopped food. Where does it go?
-            h = bot_info.get('holding', {})
-            fname = h.get('food_name', '').upper()
-
-            # Meat -> Cooker
-            if fname == "MEAT":
-                if self.move_towards(controller, bot_id, kx, ky):
-                    if controller.place(bot_id, kx, ky):
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
             
-            # Onion -> Assembly Counter (Onions are not cooked in this game engine)
-            else:
-                if self.move_towards(controller, bot_id, ax, ay):
-                    if controller.place(bot_id, ax, ay):
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
     
     def play_provider_bot(self, controller, bot_id):
         if controller.get_turn() == 1: # if starting state
