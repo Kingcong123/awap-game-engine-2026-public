@@ -223,16 +223,17 @@ class BotPlayer:
 
 
     def play_provider_bot(self, controller, bot_id):
-        if True: # if starting state
+        if controller.get_turn() == 1: # if starting state
             self.get_pans(controller, bot_id)
     
     def get_pans(self, controller, bot_id):
         for _ in range(2):
             bot_state = controller.get_bot_state(bot_id)
             bx, by = bot_state['x'], bot_state['y']
-            shop_x, shop_y = self.find_nearest_tile(controller, bx, by, '$')
+            if not bot_state['holding']:
+                shop_x, shop_y = self.find_nearest_tile(controller, bx, by, '$')
 
-            if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
-                controller.wash_sink(bot_id, shop_x, shop_y)
-            else:
-                self.move_towards(controller, bot_id, sinkx, sinky)
+                if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
+                    controller.buy(bot_id, "PANS", shop_x, shop_y)
+                else:
+                    self.move_towards(controller, bot_id, shop_x, shop_y)
