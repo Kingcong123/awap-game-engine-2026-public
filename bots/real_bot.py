@@ -6,17 +6,15 @@ from game_constants import Team, TileType, FoodType, ShopCosts
 from robot_controller import RobotController
 from item import Pan, Plate, Food
 
-from helpers import locations
-
 class BotPlayer:
     def __init__(self, map_copy):
         self.map = map_copy
-        self.locations = locations.find_important_locations(self.map)
+        self.locations = self.find_important_locations(self.map)
         self.assembler_bot_id = None
         self.provider_bot_id = None
 
         self.boxes = [(-1, x,y) for (x,y) in self.locations["BOXES"]]
-        self.cookers = [(False, False, x,y) for (x,y) in self.locations["COOKER"]]
+        self.cookers = [(True, False, x,y) for (x,y) in self.locations["COOKER"]]
 
         self.bot_states = {}     # Tracks what each bot is doing
         self.current_order_target = None
@@ -27,6 +25,32 @@ class BotPlayer:
 
         self.clean_plates = 0
         self.dirty_plates = 0
+
+        self.pans = 0
+
+
+    def find_important_locations(self, map_instance):
+        locations = {
+            "COOKER": [],           # 'K'
+            "SINK": [],             # 'S'
+            "SINKTABLE": [],        # 'T'
+            "SUBMIT": [],           # 'U'
+            "SHOP": [],             # '$'
+            "TRASH": [],            # 'R'
+            "COUNTER": [],          # 'C'
+            "BOXES": []               # 'B'
+        }
+
+        # 1. Scan the grid for fixed stations
+        for x in range(map_instance.width):
+            for y in range(map_instance.height):
+                tile_name = map_instance.tiles[x][y].tile_name
+                
+                # Map the exact tile names to our dictionary keys
+                if tile_name in locations:
+                    locations[tile_name].append((x, y))
+
+        return locations
 
     def get_bfs_path(self, controller: RobotController, start: Tuple[int, int], target_predicate) -> Optional[Tuple[int, int]]:
         queue = deque([(start, [])]) 
@@ -45,7 +69,7 @@ class BotPlayer:
                     if dx == 0 and dy == 0: continue
                     nx, ny = curr_x + dx, curr_y + dy
                     if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
-                        if controller.get_map().is_tile_walkable(nx, ny):
+                        if controller.get_map(controller.get_team()).is_tile_walkable(nx, ny):
                             visited.add((nx, ny))
                             queue.append(((nx, ny), path + [(dx, dy)]))
         return None
@@ -65,7 +89,7 @@ class BotPlayer:
     def find_nearest_tile(self, controller: RobotController, bot_x: int, bot_y: int, tile_name: str) -> Optional[Tuple[int, int]]:
         best_dist = 9999
         best_pos = None
-        m = controller.get_map()
+        m = controller.get_map(controller.get_team())
         for x in range(m.width):
             for y in range(m.height):
                 tile = m.tiles[x][y]
@@ -77,185 +101,68 @@ class BotPlayer:
         return best_pos
 
     def play_turn(self, controller: RobotController):
-        my_bots = controller.get_team_bot_ids()
+        my_bots = controller.get_team_bot_ids(controller.get_team())
         if not my_bots: return
     
         self.provider_bot_id = my_bots[0]
-        provider_bot_id = self.my_bot_id
+        provider_bot_id = self.provider_bot_id
 
-        self.assembler_bot = my_bots[1]
-        assembly_bot_id = self.assembly_bot_id
-
-        if self.invading:
-            ...
-        else:
-            self.play_assembler_bot(assembly_bot_id, controller)
-            self.play_provider_bot(provider_bot_id, controller)
-        
-    def play_assembler_bot(self, bot_id, controller: RobotController):
-        """
-        Role: Sourcing & Prep (The "Sous Chef")
-        Responsibilities: 
-        1. Check the current order.
-        2. Buy the necessary ingredient.
-        3. Chop it (if required).
-        4. Place it on the Cooker (if cookable) or Assembly Counter (if just prep).
-        """
-        if bot_id not in self.bot_states:
-            self.bot_states[bot_id] = 0
-            
-        state = self.bot_states[bot_id]
-        bot_info = controller.get_bot_state(bot_id)
-
-        sx, sy = self.locations["SHOP"][0]
-        cx, cy = self.locations["COUNTER"][0]
-
-        def is_holding(name):
-            h = bot_info.get('holding')
-            if not h: 
-                return False
-            if isinstance(h, dict):
-                return h.get('food_name', '').upper() == name.upper()
-            return False
-
-        # 2. Determine Target Ingredient
-        # We look at the shared order target and the count of items we've already prepped.
-        if not self.current_order_target:
-            return # Wait for game logic to pick an order
-            
-        required_items = self.current_order_target['required']
-
-        # Get the specific ingredient we need right now
-        found_item = False
-        while(not found_item and self.ingredients_processed_count < len(required_items)):
-            target_name = required_items[self.ingredients_processed_count]
-            if target_name in ["NOODLES", "EGG"]:
-                self.ingredients_processed_count += 1
-            else:
-                found_item = True
-
-        # If we have finished all ingredients, go to Waiting Zone
-        if self.ingredients_processed_count >= len(required_items):
-            return
-
-        target_enum = self.name_to_enum.get(target_name.upper())
-        
-        if not target_enum:
-            # Skip invalid/unknown ingredients to prevent freezing
-            self.ingredients_processed_count += 1
-            return
-
-        # --- STATE 0: Buy Ingredient ---
-        if state == 0:
-            # If we already have it, skip to processing
-            if is_holding(target_name):
-                self.bot_states[bot_id] = 1
-                return
-
-            # Go to Shop
-            if self.move_towards(controller, bot_id, sx, sy):
-                # Check funds
-                if controller.get_team_money() >= target_enum.buy_cost:
-                    if controller.buy(bot_id, target_enum, sx, sy):
-                        if target_enum.food_name in ["MEAT", "ONIONS"]:
-                            self.bot_states[bot_id] = 1 # Go chop
-                        else:
-                            self.bot_states[bot_id] = 2 # Cook
-
-
-        # --- STATE 1: Route to Station ---
-        elif state == 1:
-            # Sanity Check: Did we lose the item?
-            if not is_holding(target_name):
-                self.bot_states[bot_id] = 0 # Retry buy
-                self.ingredients_processed_count -= 1
-                return
-
-            item_name = target_name.upper()
-
-            # ROUTE A: Needs Chopping (Meat, Onion) -> Go to Chop Counter
-            if item_name in ["MEAT", "ONION"]:
-                if self.move_towards(controller, bot_id, cx, cy):
-                    # Place it on the counter to chop
-                    if controller.chop(bot_id, cx, cy):
-                        self.bot_states[bot_id] = 2
-                        if item_name in []
-
-            # ROUTE B: Needs Cooking Only (Egg) -> Go to Cooker
-            elif item_name == "EGG":
-                if self.move_towards(controller, bot_id, kx, ky):
-                    # Place on cooker (RobotController handles Pan check internally in place())
-                    if controller.place(bot_id, kx, ky):
-                        # Done! Egg is on the stove.
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
-
-            # ROUTE C: No Prep (Noodles, Sauce) -> Go to Assembly Counter
-            else:
-                if self.move_towards(controller, bot_id, ax, ay):
-                    if controller.place(bot_id, ax, ay):
-                        # Done! Item is ready for pickup.
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
-
-        # --- STATE 3: Pickup Chopped Item ---
-        elif state == 3:
-            if controller.pickup(bot_id, cx, cy):
-                self.bot_states[bot_id] = 4
-
-        # --- STATE 4: Deliver Chopped Item ---
-        elif state == 4:
-            # We are holding chopped food. Where does it go?
-            h = bot_info.get('holding', {})
-            fname = h.get('food_name', '').upper()
-
-            # Meat -> Cooker
-            if fname == "MEAT":
-                if self.move_towards(controller, bot_id, kx, ky):
-                    if controller.place(bot_id, kx, ky):
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
-            
-            # Onion -> Assembly Counter (Onions are not cooked in this game engine)
-            else:
-                if self.move_towards(controller, bot_id, ax, ay):
-                    if controller.place(bot_id, ax, ay):
-                        self.ingredients_processed_count += 1
-                        self.bot_states[bot_id] = 0
-    
+        self.play_provider_bot(controller, provider_bot_id)
+     
     def play_provider_bot(self, controller, bot_id):
-        if controller.get_turn() == 1: # if starting state
-            self.get_pans(controller, bot_id)
-        pass
+        if bot_id not in self.bot_states:
+            self.bot_states[bot_id] = 0 #init state
+
+        if self.bot_states[bot_id] == 0:
+            if self.clean_plates<1:
+                self.bot_states[bot_id] = 1
+
+            elif self.dirty_plates == 1:
+                self.bot_states[bot_id] = 2
+
+
+        if self.bot_states[bot_id] == 1:
+            if self.get_plate(controller, bot_id):
+                self.bot_states[bot_id] = 0
+
+        elif self.bot_states[bot_id] == 2:
+            if self.wash_dishes(controller, bot_id):
+                self.bot_states[bot_id] = 0
     
-    def get_pans(self, controller, bot_id):
+    
+    def get_plate(self, controller, bot_id):
         bot_state = controller.get_bot_state(bot_id)
         bx, by = bot_state['x'], bot_state['y']
         if not bot_state['holding']:
-            shop_x, shop_y = self.find_nearest_tile(controller, bx, by, '$')
+            shop_x, shop_y = self.find_nearest_tile(controller, bx, by, 'SHOP')
+
+            self.move_towards(controller, bot_id, shop_x, shop_y)
 
             if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
-                controller.buy(bot_id, "PANS", shop_x, shop_y)
-            else:
-                self.move_towards(controller, bot_id, shop_x, shop_y)
+                controller.buy(bot_id, ShopCosts.PLATE, shop_x, shop_y)
+                return False
+            
         else:
-            # for now just choose first available stove
-            for has_pan, _, x, y in self.cookers:
-                if not has_pan:
-                    stove_x, stove_y = x, y
-                    break
+            x, y = self.locations["SINKTABLE"][0]
 
-            if (abs(stove_x-bx) <= 1 and abs(stove_y-by) <= 1): # can access stove
-                controller.place(bot_id, stove_x, stove_y)
+            if (abs(x-bx) <= 1 and abs(y-by) <= 1): # can access stove
+                controller.place(bot_id, x, y)
+                self.clean_plates+=1
+                return True
             else:
-                self.move_towards(controller, bot_id, stove_x, stove_y)
+                self.move_towards(controller, bot_id, x, y)
+                return False
 
     def wash_dishes(self, controller: RobotController, bot_id):
         bot_state = controller.get_bot_state(bot_id)
         bx, by = bot_state['x'], bot_state['y']
-        sinkx, sinky = self.find_nearest_tile(controller, bx, by, 'S')
+        sinkx, sinky = self.find_nearest_tile(controller, bx, by, 'SINK')
+
+        self.move_towards(controller, bot_id, sinkx, sinky)
 
         if (abs(sinkx-bx) <= 1 and abs(sinky-by) <= 1): #can access sink
-            controller.wash_sink(bot_id, sinkx, sinky)
-        else:
-            self.move_towards(controller, bot_id, sinkx, sinky):
+            if controller.wash_sink(bot_id, sinkx, sinky):
+                self.clean_plates+=1
+                self.dirty_plates-=1
+                return True
+        return False
