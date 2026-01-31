@@ -8,6 +8,7 @@ def find_important_locations(map_instance):
             "SHOP": [],             # '$'
             "TRASH": [],            # 'R'
             "COUNTER": [],          # 'C'
+            "BOX": []               # 'B'
         }
 
         # 1. Scan the grid for fixed stations
