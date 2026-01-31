@@ -258,4 +258,4 @@ class BotPlayer:
         if (abs(sinkx-bx) <= 1 and abs(sinky-by) <= 1): #can access sink
             controller.wash_sink(bot_id, sinkx, sinky)
         else:
-            self.move_towards(controller, bot_id, sinkx, sinky)
+            self.move_towards(controller, bot_id, sinkx, sinky):
