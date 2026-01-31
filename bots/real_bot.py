@@ -212,6 +212,8 @@ class BotPlayer:
                         self.bot_states[bot_id] = 0
     
     def play_provider_bot(self, controller, bot_id):
-        shop_x, shop_y = self.locations["SHOP"]
-        bot_state = controller.get_bot_state(bot_id)
-        bx, by = bot_state['x'], bot_state['y']
+        if True: # if starting state
+            self.get_pans(controller, bot_id)
+    
+    def get_pans(self, controller, bot_id):
+        
