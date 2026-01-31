@@ -18,6 +18,7 @@ class BotPlayer:
         self.current_order_target = None
         self.ingredients_processed_count = 0
 
+        self.invading = False
         self.state = 0
 
     def get_bfs_path(self, controller: RobotController, start: Tuple[int, int], target_predicate) -> Optional[Tuple[int, int]]:
@@ -77,6 +78,12 @@ class BotPlayer:
 
         self.assembler_bot = my_bots[1]
         assembly_bot_id = self.assembly_bot_id
+
+        if self.invading:
+            ...
+        else:
+            self.play_assembler_bot(assembly_bot_id)
+            self.provider_bot_id(provider_bot_id)
         
     def play_assembler_bot(self, bot_id):
 
