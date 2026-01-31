@@ -12,7 +12,8 @@ class BotPlayer:
     def __init__(self, map_copy):
         self.map = map_copy
         self.locations = locations.find_important_locations(self.map)
-        self.my_bot_id = None
+        self.assembler_bot_id = None
+        self.provider_bot_id = None
 
         self.bot_states = [0,0]     # Tracks what each bot is doing
         self.current_order_target = None
