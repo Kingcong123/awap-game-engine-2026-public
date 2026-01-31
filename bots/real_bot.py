@@ -249,3 +249,13 @@ class BotPlayer:
                 controller.place(bot_id, stove_x, stove_y)
             else:
                 self.move_towards(controller, bot_id, stove_x, stove_y)
+
+    def wash_dishes(self, controller: RobotController, bot_id):
+        bot_state = controller.get_bot_state(bot_id)
+        bx, by = bot_state['x'], bot_state['y']
+        sinkx, sinky = self.find_nearest_tile(controller, bx, by, 'S')
+
+        if (abs(sinkx-bx) <= 1 and abs(sinky-by) <= 1): #can access sink
+            controller.wash_sink(bot_id, sinkx, sinky)
+        else:
+            self.move_towards(controller, bot_id, sinkx, sinky)
