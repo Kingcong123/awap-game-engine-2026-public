@@ -20,12 +20,16 @@ class BotPlayer:
 
         # First boolean is if a pan is there
         # Second boolean is if it is cooking
-        self.cookers = [(False, False, x,y) for (x,y) in self.locations["COOKER"]]
+        self.cookers = [(True, False, x,y) for (x,y) in self.locations["COOKER"]]
+
+        self.goal_stove = None
 
         self.assembly_counter = self.locations["COUNTER"][-1]
 
         self.bot_states = {}     # Tracks what each bot is doing
         self.current_order_target = None
+        self.order_target_status = None
+
         self.ingredients_processed_count = 0
         self.provider_processed_count = 0
 
@@ -132,17 +136,18 @@ class BotPlayer:
             
         required_items = self.current_order_target['required']
 
-        # Get the specific ingredient we need right now
-        found_item = False
-        while(not found_item and self.ingredients_processed_count < len(required_items)):
-            target_name = required_items[self.ingredients_processed_count]
-            if target_name in ["NOODLES", "EGG"]:
-                self.ingredients_processed_count += 1
+        # Skip items the Assembler handles (Noodles/Sauce) or items we already did
+        target_name = None
+        while self.provider_processed_count < len(required_items):
+            candidate = required_items[self.provider_processed_count]
+            if candidate in ["NOODLES", "SAUCE"]: # Assembler handles these
+                self.provider_processed_count += 1
             else:
-                found_item = True
+                target_name = candidate
+                break
 
         # If we have finished all ingredients, go to Waiting Zone
-        if self.ingredients_processed_count >= len(required_items):
+        if not target_name:
             return
 
         target_enum = self.name_to_enum.get(target_name.upper())
@@ -154,49 +159,128 @@ class BotPlayer:
 
         # --- STATE 0: Buy Ingredient ---
         if state == 0:
-            # If we already have it, skip to processing
             if is_holding(target_name):
-                self.bot_states[bot_id] = 1
+                # We have it. Where does it go?
+                if target_name in ["MEAT", "ONION", "ONIONS"]:
+                    self.bot_states[bot_id] = 1 # Go Chop
+                else:
+                    self.bot_states[bot_id] = 2 # Go Cook (Egg)
                 return
 
-            # Go to Shop
             if self.move_towards(controller, bot_id, sx, sy):
-                # Check funds
                 if controller.get_team_money() >= target_enum.buy_cost:
                     if controller.buy(bot_id, target_enum, sx, sy):
-                        if target_enum.food_name in ["MEAT", "ONIONS"]:
-                            self.bot_states[bot_id] = 1 # Go chop
-                        else:
-                            self.bot_states[bot_id] = 2 # Cook
+                        # State transition handled next turn by is_holding check
+                        pass
 
-
-        # --- STATE 1: Route to Station ---
+        # --- STATE 1: Chop Routine (Meat & Onion) ---
+        # Sequence: Place -> Chop -> Pickup
         elif state == 1:
-            # Sanity Check: Did we lose the item?
-            if not is_holding(target_name):
-                self.bot_states[bot_id] = 0 # Retry buy
-                self.ingredients_processed_count -= 1
-                return
-
             item_name = target_name.upper()
-
-            # ROUTE A: Needs Chopping (Meat, Onion) -> Go to Chop Counter
-            if item_name in ["MEAT", "ONION"]:
+            
+            # Sub-state: Holding raw food -> Place on Counter
+            if is_holding(item_name):
                 if self.move_towards(controller, bot_id, cx, cy):
-                    # Place it on the counter to chop
-                    if controller.chop(bot_id, cx, cy):
-                        self.bot_states[bot_id] = 2
-                        if item_name == "ONION":
-                            self.bot_states[bot_id] = 4
-                        else:
-                            self.bot_states[bot_id] = 2
+                    if controller.place(bot_id, cx, cy):
+                        # Placed successfully. Now we need to CHOP.
+                        pass 
+            
+            # Sub-state: Hands empty? Check counter.
+            else:
+                tile = controller.get_tile(controller.get_team(), cx, cy)
+                if tile and tile.item:
+                    # Is it chopped yet?
+                    if tile.item.chopped:
+                        if controller.pickup(bot_id, cx, cy):
+                            # Picked up chopped food. Next destination?
+                            if item_name == "ONIONS" or item_name == "ONION":
+                                self.bot_states[bot_id] = 3 # Store Onion
+                            else:
+                                self.bot_states[bot_id] = 2 # Cook Meat
+                    else:
+                        # Not chopped -> Chop it
+                        controller.chop(bot_id, cx, cy)
 
         # --- STATE 2: Cook Item
         elif state == 2:
-            if 
+            if self.goal_stove is None:
+                for idx, (has_pan, is_cooking, x, y) in enumerate(self.cookers):
+                    # We need a stove that HAS a pan but is NOT cooking
+                    # Note: You need to update self.cookers in your Assembler bot 
+                    # when it places a pan! For now, assuming pans exist.
+                    if has_pan and not is_cooking: 
+                        self.goal_stove = (x, y, idx)
+                        break
+            
+            # No stove found? Wait.
+            if self.goal_stove is None:
+                return
+            
+            gx, gy, g_idx = self.goal_stove
+            if self.move_towards(controller, bot_id,x,y):
+                if self.move_towards(controller, bot_id, gx, gy):
+                # 3. Place Food (this puts it in the pan)
+                    if controller.place(bot_id, gx, gy):
+                        # 4. Start Cooking
+                        if controller.start_cook(bot_id, gx, gy):
+                            # Success! Update tracking
+                            self.provider_processed_count += 1
+                            self.bot_states[bot_id] = 0
+                            self.goal_stove = None
+                            
+                            # Mark this stove as 'Cooking'
+                            self.cookers[g_idx] = (True, True, gx, gy)
+
+                    else: 
+                        #STOLEN! INVADERS
+                        self.goal_stove = None
+                        self.cookers[g_idx] = (False, False, gx, gy)
 
         # --- STATE 4: Deliver Chopped Item to boxes---
-        elif state == 4:
+        elif state == 3:
+            target_box_loc = None
+            found_valid_box = False
+            
+            # Iterate through all known box locations to find a compatible one
+            # self.boxes is a list of tuples like (-1, x, y)
+            for box_info in self.boxes:
+                bx, by = box_info[1], box_info[2]
+                
+                # Check the live state of the box tile
+                tile = controller.get_tile(controller.get_team(), bx, by)
+                
+                # A Box is valid if:
+                # 1. It exists (sanity check)
+                # 2. It is currently empty (tile.item is None)
+                # 3. OR it already contains the same food we are holding
+                if tile:
+                    if tile.item is None:
+                        # Empty box found!
+                        target_box_loc = (bx, by)
+                        found_valid_box = True
+                        break
+                    
+                    elif isinstance(tile.item, Food):
+                        # Box is not empty. Is it the same type?
+                        # Note: We match names (e.g., "ONIONS" == "ONIONS")
+                        if tile.item.food_name.upper() == target_name.upper():
+                             target_box_loc = (bx, by)
+                             found_valid_box = True
+                             break
+            
+            # If we found a valid place, go there
+            if found_valid_box and target_box_loc:
+                tx, ty = target_box_loc
+                if self.move_towards(controller, bot_id, tx, ty):
+                    if controller.place(bot_id, tx, ty):
+                        # Success!
+                        self.provider_processed_count += 1
+                        self.bot_states[bot_id] = 0
+            else:
+                # No valid box found (all full of other stuff)? 
+                # Wait or stay put to avoid walking into a wall
+                pass
+            
             
     
     def play_provider_bot(self, controller, bot_id):
