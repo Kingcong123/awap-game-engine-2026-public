@@ -22,6 +22,8 @@ class BotPlayer:
         # Second boolean is if it is cooking
         self.cookers = [(False, False, x,y) for (x,y) in self.locations["COOKER"]]
 
+        self.assembly_counter = self.locations["COUNTER"][-1]
+
         self.bot_states = {}     # Tracks what each bot is doing
         self.current_order_target = None
         self.ingredients_processed_count = 0
