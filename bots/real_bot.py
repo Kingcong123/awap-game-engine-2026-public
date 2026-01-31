@@ -6,6 +6,13 @@ from game_constants import Team, TileType, FoodType, ShopCosts
 from robot_controller import RobotController
 from item import Pan, Plate, Food
 
+import os 
+import sys
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.append(script_dir)
+
 from helpers import locations
 
 class BotPlayer:
@@ -16,7 +23,7 @@ class BotPlayer:
         self.provider_bot_id = None
 
         # The integer defines the ingredient that is currently stored in the box. Each box can store multiple of one ingredient
-        self.boxes = [(-1, x,y) for (x,y) in self.locations["BOXES"]]
+        self.boxes = [(x,y) for (x,y) in self.locations["BOX"]]
 
         # First boolean is if a pan is there
         # Second boolean is if it is cooking
@@ -27,7 +34,7 @@ class BotPlayer:
         self.assembly_counter = self.locations["COUNTER"][-1]
 
         self.bot_states = {}     # Tracks what each bot is doing
-        self.current_order_target = None
+        self.order_id = None
         self.order_target_status = None
 
         self.ingredients_processed_count = 0
@@ -40,6 +47,7 @@ class BotPlayer:
         self.dirty_plates = 0
 
     def get_bfs_path(self, controller: RobotController, start: Tuple[int, int], target_predicate) -> Optional[Tuple[int, int]]:
+        
         queue = deque([(start, [])]) 
         visited = set([start])
         w, h = self.map.width, self.map.height
@@ -88,7 +96,20 @@ class BotPlayer:
         return best_pos
 
     def play_turn(self, controller: RobotController):
-        my_bots = controller.get_team_bot_ids()
+        #Get the orders and initialize the order_id
+        self.orders = controller.get_orders(controller.get_team())
+        if self.order_id == None and self.orders != None:
+            self.order_id = 0 
+        
+        #See if the orders are still active and update accordingly
+        while len(self.orders) > self.order_id and self.orders[self.order_id]["expires_turn"] <= controller.get_turn(controller.get_team()): 
+            self.order_id += 1
+        
+        #Gone through all orders
+        if self.order_id >= len(self.orders):
+            return
+
+        my_bots = controller.get_team_bot_ids(controller.get_team())
         if not my_bots: return
     
         self.provider_bot_id = my_bots[0]
@@ -131,10 +152,10 @@ class BotPlayer:
 
         # 2. Determine Target Ingredient
         # We look at the shared order target and the count of items we've already prepped.
-        if not self.current_order_target:
+        if self.order_id == None:
             return # Wait for game logic to pick an order
             
-        required_items = self.current_order_target['required']
+        required_items = self.orders[self.order_id]['required']
 
         # Skip items the Assembler handles (Noodles/Sauce) or items we already did
         target_name = None
@@ -238,44 +259,15 @@ class BotPlayer:
 
         # --- STATE 4: Deliver Chopped Item to boxes---
         elif state == 3:
-            target_box_loc = None
-            found_valid_box = False
             
-            # Iterate through all known box locations to find a compatible one
-            # self.boxes is a list of tuples like (-1, x, y)
-            for box_info in self.boxes:
-                bx, by = box_info[1], box_info[2]
+            tx, ty= self.boxes[0][0], self.boxes[0][1] 
                 
-                # Check the live state of the box tile
-                tile = controller.get_tile(controller.get_team(), bx, by)
-                
-                # A Box is valid if:
-                # 1. It exists (sanity check)
-                # 2. It is currently empty (tile.item is None)
-                # 3. OR it already contains the same food we are holding
-                if tile:
-                    if tile.item is None:
-                        # Empty box found!
-                        target_box_loc = (bx, by)
-                        found_valid_box = True
-                        break
-                    
-                    elif isinstance(tile.item, Food):
-                        # Box is not empty. Is it the same type?
-                        # Note: We match names (e.g., "ONIONS" == "ONIONS")
-                        if tile.item.food_name.upper() == target_name.upper():
-                             target_box_loc = (bx, by)
-                             found_valid_box = True
-                             break
-            
             # If we found a valid place, go there
-            if found_valid_box and target_box_loc:
-                tx, ty = target_box_loc
-                if self.move_towards(controller, bot_id, tx, ty):
-                    if controller.place(bot_id, tx, ty):
-                        # Success!
-                        self.provider_processed_count += 1
-                        self.bot_states[bot_id] = 0
+            if self.move_towards(controller, bot_id, tx, ty):
+                if controller.place(bot_id, tx, ty):
+                    # Success!
+                    self.provider_processed_count += 1
+                    self.bot_states[bot_id] = 0
             else:
                 # No valid box found (all full of other stuff)? 
                 # Wait or stay put to avoid walking into a wall
@@ -284,7 +276,8 @@ class BotPlayer:
             
     
     def play_provider_bot(self, controller, bot_id):
-        if controller.get_turn() == 1: # if starting state
+        return
+        '''if controller.get_turn() == 1: # if starting state
             self.get_pans(controller, bot_id)
         pass
     
@@ -318,4 +311,4 @@ class BotPlayer:
         if (abs(sinkx-bx) <= 1 and abs(sinky-by) <= 1): #can access sink
             controller.wash_sink(bot_id, sinkx, sinky)
         else:
-            self.move_towards(controller, bot_id, sinkx, sinky)
+            self.move_towards(controller, bot_id, sinkx, sinky)'''
