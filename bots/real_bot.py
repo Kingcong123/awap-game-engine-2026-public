@@ -224,25 +224,28 @@ class BotPlayer:
                         self.bot_states[bot_id] = 0
     
     def play_provider_bot(self, controller, bot_id):
-<<<<<<< HEAD
         if controller.get_turn() == 1: # if starting state
             self.get_pans(controller, bot_id)
+        pass
     
     def get_pans(self, controller, bot_id):
-        for _ in range(2):
-            bot_state = controller.get_bot_state(bot_id)
-            bx, by = bot_state['x'], bot_state['y']
-            if not bot_state['holding']:
-                shop_x, shop_y = self.find_nearest_tile(controller, bx, by, '$')
+        bot_state = controller.get_bot_state(bot_id)
+        bx, by = bot_state['x'], bot_state['y']
+        if not bot_state['holding']:
+            shop_x, shop_y = self.find_nearest_tile(controller, bx, by, '$')
 
-                if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
-                    controller.buy(bot_id, "PANS", shop_x, shop_y)
-                else:
-                    self.move_towards(controller, bot_id, shop_x, shop_y)
+            if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
+                controller.buy(bot_id, "PANS", shop_x, shop_y)
             else:
-                stove_x, stove_y = self.find_nearest_tile(controller, bx, by, 'K')
+                self.move_towards(controller, bot_id, shop_x, shop_y)
+        else:
+            # for now just choose first available stove
+            for has_pan, _, x, y in self.cookers:
+                if not has_pan:
+                    stove_x, stove_y = x, y
+                    break
 
-                if (abs(stove_x-bx) <= 1 and abs(stove_y-by) <= 1): # can access shop
-                    controller.stove(bot_id, "PANS", shop_x, shop_y)
-                else:
-                    self.move_towards(controller, bot_id, shop_x, shop_y)
+            if (abs(stove_x-bx) <= 1 and abs(stove_y-by) <= 1): # can access stove
+                controller.place(bot_id, stove_x, stove_y)
+            else:
+                self.move_towards(controller, bot_id, stove_x, stove_y)
