@@ -104,6 +104,9 @@ class BotPlayer:
         state = self.bot_states[bot_id]
         bot_info = controller.get_bot_state(bot_id)
 
+        sx, sy = self.locations["SHOP"][0]
+        cx, cy = self.locations["COUNTER"][0]
+
         def is_holding(name):
             h = bot_info.get('holding')
             if not h: 
@@ -146,7 +149,11 @@ class BotPlayer:
                 # Check funds
                 if controller.get_team_money() >= target_enum.buy_cost:
                     if controller.buy(bot_id, target_enum, sx, sy):
-                        self.bot_states[bot_id] = 1
+                        if target_enum.food_name in ["MEAT", "ONIONS"]:
+                            self.bot_states[bot_id] = 1 # Go chop
+                        else:
+                            self.bot_states[bot_id] = 2 # Cook
+
 
         # --- STATE 1: Route to Station ---
         elif state == 1:
@@ -158,11 +165,17 @@ class BotPlayer:
             item_name = target_name.upper()
 
             # ROUTE A: Needs Chopping (Meat, Onion) -> Go to Chop Counter
+<<<<<<< HEAD
             if item_name in ["MEAT", "ONION", "ONIONS"]:
+=======
+
+            if item_name in ["MEAT", "ONIONS"]:
+>>>>>>> 8eedf4f (stuff)
                 if self.move_towards(controller, bot_id, cx, cy):
                     # Place it on the counter to chop
-                    if controller.place(bot_id, cx, cy):
+                    if controller.chop(bot_id, cx, cy):
                         self.bot_states[bot_id] = 2
+                        if item_name in []
 
             # ROUTE B: Needs Cooking Only (Egg) -> Go to Cooker
             elif item_name == "EGG":
@@ -180,11 +193,6 @@ class BotPlayer:
                         # Done! Item is ready for pickup.
                         self.ingredients_processed_count += 1
                         self.bot_states[bot_id] = 0
-
-        # --- STATE 2: Chop Action ---
-        elif state == 2:
-            if controller.chop(bot_id, cx, cy):
-                self.bot_states[bot_id] = 3
 
         # --- STATE 3: Pickup Chopped Item ---
         elif state == 3:
@@ -211,18 +219,8 @@ class BotPlayer:
                         self.ingredients_processed_count += 1
                         self.bot_states[bot_id] = 0
     
-    def wash_dishes(self, controller: RobotController, bot_id):
-        bot_state = controller.get_bot_state(bot_id)
-        bx, by = bot_state['x'], bot_state['y']
-        sinkx, sinky = self.find_nearest_tile(controller, bx, by, 'S')
-
-        if (abs(sinkx-bx) <= 1 and abs(sinky-by) <= 1): #can access sink
-            controller.wash_sink(bot_id, sinkx, sinky)
-        else:
-            self.move_towards(controller, bot_id, sinkx, sinky)
-
-
     def play_provider_bot(self, controller, bot_id):
+<<<<<<< HEAD
         if controller.get_turn() == 1: # if starting state
             self.get_pans(controller, bot_id)
     
@@ -233,7 +231,7 @@ class BotPlayer:
             if not bot_state['holding']:
                 shop_x, shop_y = self.find_nearest_tile(controller, bx, by, '$')
 
-                if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
-                    controller.buy(bot_id, "PANS", shop_x, shop_y)
-                else:
-                    self.move_towards(controller, bot_id, shop_x, shop_y)
+            if (abs(shop_x-bx) <= 1 and abs(shop_y-by) <= 1): # can access shop
+                controller.wash_sink(bot_id, shop_x, shop_y)
+            else:
+                self.move_towards(controller, bot_id, sinkx, sinky)
