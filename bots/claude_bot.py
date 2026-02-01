@@ -21,8 +21,11 @@ class BotPlayer:
 
         # Current order tracking
         self.current_order = None
+        self.current_order_id = None
         self.cooked_ingredients = []
         self.simple_ingredients = []
+        self.cooked_count = 0  # How many cooked ingredients we've made so far
+        self.cooked_total = 0  # Total cooked ingredients needed for this order
 
         # Coordination flags
         self.pan_on_cooker = False
@@ -115,7 +118,11 @@ class BotPlayer:
         return None
 
     def analyze_order(self, order: Dict[str, Any]) -> None:
+        # Don't re-analyze the same order
+        if self.current_order_id == order.get('order_id'):
+            return
         self.current_order = order
+        self.current_order_id = order.get('order_id')
         self.cooked_ingredients = []
         self.simple_ingredients = []
         for food_name in order['required']:
@@ -125,6 +132,8 @@ class BotPlayer:
                     self.cooked_ingredients.append(ft)
                 else:
                     self.simple_ingredients.append(ft)
+        self.cooked_count = 0
+        self.cooked_total = len(self.cooked_ingredients)
 
     def play_turn(self, controller: RobotController):
         my_bots = controller.get_team_bot_ids(controller.get_team())
@@ -259,6 +268,7 @@ class BotPlayer:
                 tile = controller.get_tile(team, self.cooker_loc[0], self.cooker_loc[1])
                 if tile and isinstance(tile.item, Pan) and tile.item.food:
                     if tile.item.food.cooked_stage == 1:
+                        self.cooked_count += 1  # This ingredient is done
                         self.provider_state = 9
                     elif tile.item.food.cooked_stage == 2:
                         if self.move_towards(controller, bot_id, self.cooker_loc[0], self.cooker_loc[1], current_turn):
@@ -274,12 +284,12 @@ class BotPlayer:
             if self.cooker_loc:
                 tile = controller.get_tile(team, self.cooker_loc[0], self.cooker_loc[1])
                 if tile and isinstance(tile.item, Pan) and tile.item.food is None:
-                    orders = controller.get_orders(team)
-                    active = [o for o in orders if o['is_active']]
-                    if active:
-                        self.analyze_order(active[0])
-                        self.provider_state = 0
+                    # Check if there are more cooked ingredients to make for this order
+                    if self.cooked_count < self.cooked_total:
+                        self.current_cooking_ingredient = self.cooked_ingredients[self.cooked_count]
+                        self.provider_state = 3  # Go buy next ingredient
                     else:
+                        # All cooked ingredients done, wait for next order
                         self.provider_state = 100
 
         # State 99: Trash
@@ -289,13 +299,17 @@ class BotPlayer:
                     if controller.trash(bot_id, self.trash_loc[0], self.trash_loc[1]):
                         self.provider_state = 3
 
-        # State 100: Idle
+        # State 100: Idle - wait for new order
         elif self.provider_state == 100:
             orders = controller.get_orders(team)
             active = [o for o in orders if o['is_active']]
             if active:
-                self.analyze_order(active[0])
-                self.provider_state = 0
+                # Check if this is a different order than what we just finished
+                new_order = active[0]
+                if new_order.get('order_id') != self.current_order_id:
+                    self.current_order_id = None  # Reset so analyze_order works
+                    self.analyze_order(new_order)
+                    self.provider_state = 0
 
     def play_assembler_bot(self, controller: RobotController, bot_id: int, current_turn: int):
         state = controller.get_bot_state(bot_id)
@@ -382,6 +396,7 @@ class BotPlayer:
                 if self.move_towards(controller, bot_id, self.submit_loc[0], self.submit_loc[1], current_turn):
                     if controller.submit(bot_id, self.submit_loc[0], self.submit_loc[1]):
                         self.current_order = None
+                        self.current_order_id = None  # Reset so we can take new orders
                         self.assembler_state = 7
 
         # State 7: Check for more orders
@@ -390,4 +405,5 @@ class BotPlayer:
             active = [o for o in orders if o['is_active']]
             if active:
                 self.analyze_order(active[0])
+                self.provider_state = 0  # Reset provider to start cooking for new order
                 self.assembler_state = 0
