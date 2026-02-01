@@ -1,60 +1,71 @@
-from __future__ import annotations
+from collections import deque
+from typing import Tuple, Optional, List, Dict, Any
 
-from collections import Counter, deque
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-
-from game_constants import FoodType, ShopCosts, Team
+from game_constants import FoodType, ShopCosts
 from robot_controller import RobotController
-from item import Food, Plate, Pan
-
-
-@dataclass(frozen=True)
-class Task:
-    kind: str
-    target: Tuple[int, int]
-    priority: int
-    meta: Dict[str, Any]
-
-
-@dataclass
-class Snapshot:
-    turn: int
-    team: Team
-    money: int
-    bots: Dict[int, Dict[str, Any]]
-    counters: Dict[Tuple[int, int], Any]
-    cookers: Dict[Tuple[int, int], Any]
-    sinktables: Dict[Tuple[int, int], Any]
-    sinks: Dict[Tuple[int, int], Any]
-    shops: List[Tuple[int, int]]
-    submits: List[Tuple[int, int]]
-    trashes: List[Tuple[int, int]]
-
+from item import Pan, Plate, Food
 
 class BotPlayer:
     def __init__(self, map_copy):
         self.map = map_copy
-        self.locations = self._find_important_locations(map_copy)
+        self.locations = self.find_important_locations(self.map)
 
-        self.current_order_id: Optional[int] = None
-        self.assembly_counter: Optional[Tuple[int, int]] = None
-        self.idle_tile: Optional[Tuple[int, int]] = None
-        self.last_tasks: Dict[int, Tuple[str, Tuple[int, int]]] = {}
+        # Bot assignments
+        self.provider_bot_id = None
+        self.assembler_bot_id = None
 
-    # ----------------------------
-    # Map helpers
-    # ----------------------------
-    def _find_important_locations(self, map_instance) -> Dict[str, List[Tuple[int, int]]]:
+        # State machines
+        self.provider_state = 0
+        self.assembler_state = 0
+        
+        # Watchdog timers (Prevent infinite loops)
+        self.provider_state_timer = 0
+        self.last_provider_state = -1
+        self.assembler_state_timer = 0
+        self.last_assembler_state = -1
+
+        # Order tracking
+        self.current_order = None
+        self.current_order_id = None
+        self.cooked_ingredients = []
+        self.cooked_queue = []
+        self.simple_ingredients = []
+        self.chopped_ingredients = []
+        self.chop_queue = []
+        self.cooked_count = 0
+        self.cooked_total = 0
+        self.current_chop_ingredient = None
+
+        # Flags
+        self.pan_on_cooker = False
+        self.current_cooking_ingredient = None
+
+        # Locations (Dynamic locks)
+        self.active_chop_loc = None
+        self.active_assemble_loc = None
+        self.cached_idle_loc = None
+
+        # Locations (Static)
+        self.cooker_loc = None
+        self.shop_loc = None
+        self.submit_loc = None
+        self.trash_loc = None
+
+        # Deterministic Movement
+        self.future_positions = {}
+        self.current_positions = {}
+
+        # Weights
+        self.order_cost_weight = 0.5
+        self.order_time_weight = 1.0
+        self.time_simple = 1
+        self.time_chop = 2
+        self.time_cook = 4
+
+    def find_important_locations(self, map_instance) -> Dict[str, List[Tuple[int, int]]]:
         locations = {
-            "COOKER": [],
-            "SINK": [],
-            "SINKTABLE": [],
-            "SUBMIT": [],
-            "SHOP": [],
-            "TRASH": [],
-            "COUNTER": [],
-            "BOX": [],
+            "COOKER": [], "SINK": [], "SINKTABLE": [], "SUBMIT": [],
+            "SHOP": [], "TRASH": [], "COUNTER": [], "BOX": []
         }
         for x in range(map_instance.width):
             for y in range(map_instance.height):
@@ -63,610 +74,628 @@ class BotPlayer:
                     locations[tile_name].append((x, y))
         return locations
 
-    # ----------------------------
-    # Per-turn snapshot
-    # ----------------------------
-    def _build_snapshot(self, controller: RobotController, bot_ids: List[int]) -> Snapshot:
-        team = controller.get_team()
-        bots: Dict[int, Dict[str, Any]] = {}
-        for bot_id in bot_ids:
-            state = controller.get_bot_state(bot_id)
-            if state:
-                bots[bot_id] = state
-
-        counters = {}
-        for pos in self.locations["COUNTER"]:
-            counters[pos] = controller.get_tile(team, pos[0], pos[1])
-
-        cookers = {}
-        for pos in self.locations["COOKER"]:
-            cookers[pos] = controller.get_tile(team, pos[0], pos[1])
-
-        sinktables = {}
-        for pos in self.locations["SINKTABLE"]:
-            sinktables[pos] = controller.get_tile(team, pos[0], pos[1])
-
-        sinks = {}
-        for pos in self.locations["SINK"]:
-            sinks[pos] = controller.get_tile(team, pos[0], pos[1])
-
-        return Snapshot(
-            turn=controller.get_turn(),
-            team=team,
-            money=controller.get_team_money(team),
-            bots=bots,
-            counters=counters,
-            cookers=cookers,
-            sinktables=sinktables,
-            sinks=sinks,
-            shops=list(self.locations["SHOP"]),
-            submits=list(self.locations["SUBMIT"]),
-            trashes=list(self.locations["TRASH"]),
-        )
-
-    # ----------------------------
-    # Order utilities
-    # ----------------------------
-    def _foodtype_by_name(self, name: str) -> Optional[FoodType]:
-        try:
-            return FoodType[name]
-        except KeyError:
-            return None
-
-    def _order_signature(self, required: List[FoodType]) -> List[Tuple[str, bool, int]]:
-        sig = [
-            (ft.food_name, bool(ft.can_chop), 1 if ft.can_cook else 0)
-            for ft in required
-        ]
-        sig.sort()
-        return sig
-
-    def _plate_signature(self, plate_foods: List[Tuple[str, bool, int]]) -> List[Tuple[str, bool, int]]:
-        sig = list(plate_foods)
-        sig.sort()
-        return sig
-
-    def _extract_plate_foods(self, plate_obj: Any) -> List[Tuple[str, bool, int]]:
-        foods: List[Tuple[str, bool, int]] = []
-        if plate_obj is None:
-            return foods
-
-        if isinstance(plate_obj, Plate):
-            for f in plate_obj.food:
-                if isinstance(f, Food):
-                    foods.append((f.food_name, bool(f.chopped), int(f.cooked_stage)))
-            return foods
-
-        if isinstance(plate_obj, dict) and plate_obj.get("type") == "Plate":
-            for f in plate_obj.get("food", []):
-                foods.append((f.get("food_name"), bool(f.get("chopped")), int(f.get("cooked_stage", 0))))
-            return foods
-
-        return foods
-
-    def _plate_matches_order(self, plate_obj: Any, required: List[FoodType]) -> bool:
-        plate_foods = self._extract_plate_foods(plate_obj)
-        return self._plate_signature(plate_foods) == self._order_signature(required)
-
-    def _available_food_names(self, snapshot: Snapshot) -> Counter:
-        counts: Counter = Counter()
-        for state in snapshot.bots.values():
-            holding = state.get("holding")
-            if isinstance(holding, dict) and holding.get("type") == "Food":
-                if holding.get("food_name"):
-                    counts[holding["food_name"]] += 1
-
-        for tile in snapshot.counters.values():
-            item = getattr(tile, "item", None)
-            if isinstance(item, Food):
-                counts[item.food_name] += 1
-
-        for tile in snapshot.cookers.values():
-            pan = getattr(tile, "item", None)
-            if isinstance(pan, Pan) and isinstance(pan.food, Food):
-                counts[pan.food.food_name] += 1
-
-        return counts
-
-    def _has_accessible_plate(self, snapshot: Snapshot) -> bool:
-        plate_obj, _, plate_holder_id = self._find_plate(snapshot)
-        if plate_obj is not None or plate_holder_id is not None:
-            return True
-        for tile in snapshot.sinktables.values():
-            if getattr(tile, "num_clean_plates", 0) > 0:
-                return True
-        return False
-
-    def _choose_order(self, controller: RobotController, snapshot: Snapshot) -> Optional[Dict[str, Any]]:
-        orders = controller.get_orders(snapshot.team)
-        active = [o for o in orders if o.get("is_active")]
-        if not active:
-            self.current_order_id = None
-            return None
-
-        if self.current_order_id is not None:
-            for o in active:
-                if o.get("order_id") == self.current_order_id:
-                    return o
-
-        available_foods = self._available_food_names(snapshot)
-        plate_available = self._has_accessible_plate(snapshot)
-
-        def missing_cost(order: Dict[str, Any]) -> int:
-            required = [self._foodtype_by_name(n) for n in order.get("required", [])]
-            needed: Counter = Counter()
-            for ft in required:
-                if ft is not None:
-                    needed[ft.food_name] += 1
-
-            cost = 0
-            for food_name, cnt in needed.items():
-                have = available_foods.get(food_name, 0)
-                missing = max(0, cnt - have)
-                if missing > 0:
-                    ft = self._foodtype_by_name(food_name)
-                    if ft is not None:
-                        cost += ft.buy_cost * missing
-            if not plate_available:
-                cost += ShopCosts.PLATE.buy_cost
-            return cost
-
-        def score(order: Dict[str, Any]) -> float:
-            req_cost = missing_cost(order)
-            time_left = max(1, order.get("expires_turn", snapshot.turn) - snapshot.turn)
-            reward = order.get("reward", 0)
-            penalty = 100000 if req_cost > snapshot.money and snapshot.money < 0 else 0
-            return (reward - req_cost - penalty) / time_left
-
-        active.sort(key=score, reverse=True)
-        self.current_order_id = active[0].get("order_id")
-        return active[0]
-
-    # ----------------------------
-    # Task building
-    # ----------------------------
-    def _empty_counters(self, snapshot: Snapshot) -> List[Tuple[int, int]]:
-        return [pos for pos, tile in snapshot.counters.items() if getattr(tile, "item", None) is None]
-
-    def _select_assembly_counter(self, snapshot: Snapshot) -> Optional[Tuple[int, int]]:
-        if self.assembly_counter in snapshot.counters:
-            tile = snapshot.counters.get(self.assembly_counter)
-            if tile is not None and getattr(tile, "item", None) is None:
-                return self.assembly_counter
-
-        if snapshot.submits:
-            sx, sy = snapshot.submits[0]
-        else:
-            sx, sy = 0, 0
-
-        candidates = self._empty_counters(snapshot)
-        if not candidates:
-            candidates = list(snapshot.counters.keys())
-        if not candidates:
-            return None
-        candidates.sort(key=lambda p: abs(p[0] - sx) + abs(p[1] - sy))
-        self.assembly_counter = candidates[0]
-        return self.assembly_counter
-
-    def _find_plate(self, snapshot: Snapshot) -> Tuple[Optional[Any], Optional[Tuple[int, int]], Optional[int]]:
-        # returns (plate_obj, plate_pos_on_counter, bot_id_holding_plate)
-        for bot_id, state in snapshot.bots.items():
-            holding = state.get("holding")
-            if isinstance(holding, dict) and holding.get("type") == "Plate" and not holding.get("dirty"):
-                return holding, None, bot_id
-
-        for pos, tile in snapshot.counters.items():
-            plate = getattr(tile, "item", None)
-            if isinstance(plate, Plate) and not plate.dirty:
-                return plate, pos, None
-        return None, None, None
-
-    def _missing_required(self, required: List[FoodType], plate_obj: Any) -> List[FoodType]:
-        needed = [ft for ft in required if ft is not None]
-        if plate_obj is None:
-            return needed
-
-        plate_foods = self._extract_plate_foods(plate_obj)
-        req_sig = Counter(self._order_signature(needed))
-        plate_sig = Counter(self._plate_signature(plate_foods))
-
-        missing: List[FoodType] = []
-        for ft in needed:
-            key = (ft.food_name, bool(ft.can_chop), 1 if ft.can_cook else 0)
-            if plate_sig.get(key, 0) < req_sig.get(key, 0):
-                missing.append(ft)
-                plate_sig[key] = plate_sig.get(key, 0) + 1
-        return missing
-
-    def _food_matches_requirement(self, food: Food, req: FoodType) -> bool:
-        if food.food_name != req.food_name:
-            return False
-        if req.can_chop and not food.chopped:
-            return False
-        if req.can_cook and food.cooked_stage != 1:
-            return False
-        if not req.can_cook and food.cooked_stage != 0:
-            return False
-        return True
-
-    def _holding_matches_requirement(self, holding: Dict[str, Any], req: FoodType) -> bool:
-        if holding.get("food_name") != req.food_name:
-            return False
-        if req.can_chop and not holding.get("chopped"):
-            return False
-        if req.can_cook and holding.get("cooked_stage") != 1:
-            return False
-        if not req.can_cook and holding.get("cooked_stage") != 0:
-            return False
-        return True
-
-    def _build_tasks(self, controller: RobotController, snapshot: Snapshot, order: Optional[Dict[str, Any]]) -> List[Task]:
-        tasks: List[Task] = []
-        if order is None:
-            return tasks
-
-        required = [self._foodtype_by_name(n) for n in order.get("required", [])]
-        plate_obj, plate_pos, plate_holder_id = self._find_plate(snapshot)
-        missing = self._missing_required(required, plate_obj)
-
-        # Submit tasks
-        if plate_obj is not None:
-            if self._plate_matches_order(plate_obj, [ft for ft in required if ft is not None]):
-                if plate_holder_id is not None:
-                    for submit_pos in snapshot.submits:
-                        tasks.append(Task("submit", submit_pos, 90, {}))
-                elif plate_pos is not None:
-                    tasks.append(Task("pickup_plate", plate_pos, 80, {}))
-
-        # Cooker monitoring
-        for pos, tile in snapshot.cookers.items():
-            pan = getattr(tile, "item", None)
-            if isinstance(pan, Pan) and isinstance(pan.food, Food):
-                if pan.food.cooked_stage == 1:
-                    tasks.append(Task("take_from_pan", pos, 100, {}))
-                elif pan.food.cooked_stage == 2:
-                    tasks.append(Task("take_from_pan", pos, 95, {"burnt": True}))
-
-        # If holding burnt food, trash it quickly
-        for bot_id, state in snapshot.bots.items():
-            holding = state.get("holding")
-            if isinstance(holding, dict) and holding.get("type") == "Food":
-                if holding.get("cooked_stage") == 2:
-                    for trash_pos in snapshot.trashes:
-                        tasks.append(Task("trash", trash_pos, 85, {}))
-
-        # Plate acquisition and placement
-        if plate_obj is None:
-            # Try sinktable first, then shop
-            for pos, tile in snapshot.sinktables.items():
-                if getattr(tile, "num_clean_plates", 0) > 0:
-                    tasks.append(Task("take_clean_plate", pos, 55, {}))
-            for pos in snapshot.shops:
-                tasks.append(Task("buy_plate", pos, 50, {}))
-        else:
-            if plate_holder_id is not None:
-                assembly = self._select_assembly_counter(snapshot)
-                empty_counters = self._empty_counters(snapshot)
-                if assembly and assembly in empty_counters:
-                    tasks.append(Task("place_plate", assembly, 60, {}))
-                else:
-                    for pos in empty_counters:
-                        tasks.append(Task("place_plate", pos, 55, {}))
-
-        # Add prepared food to plate (if plate on counter)
-        if plate_pos is not None:
-            for bot_id, state in snapshot.bots.items():
-                holding = state.get("holding")
-                if isinstance(holding, dict) and holding.get("type") == "Food":
-                    ft = self._foodtype_by_name(holding.get("food_name", ""))
-                    if ft and ft in missing:
-                        if self._holding_matches_requirement(holding, ft):
-                            tasks.append(Task("add_food_to_plate", plate_pos, 80, {"mode": "holding_food"}))
-
-            for pos, tile in snapshot.counters.items():
-                item = getattr(tile, "item", None)
-                if isinstance(item, Food):
-                    ft = self._foodtype_by_name(item.food_name)
-                    if ft and ft in missing and self._food_matches_requirement(item, ft):
-                        tasks.append(Task("pickup_food", pos, 65, {"reason": "plate"}))
-
-        # Add prepared food to plate (if plate held by a bot)
-        if plate_holder_id is not None:
-            for pos, tile in snapshot.counters.items():
-                item = getattr(tile, "item", None)
-                if isinstance(item, Food):
-                    ft = self._foodtype_by_name(item.food_name)
-                    if ft and ft in missing and self._food_matches_requirement(item, ft):
-                        tasks.append(Task("add_food_to_plate", pos, 75, {"mode": "holding_plate"}))
-
-        # Missing ingredient pipeline tasks
-        if missing:
-            missing_sorted = sorted(
-                missing,
-                key=lambda ft: (0 if ft.can_cook else 1, 0 if ft.can_chop else 1),
-            )
-            for ft in missing_sorted[:2]:
-                # If any bot already holds it, advance that item
-                for bot_id, state in snapshot.bots.items():
-                    holding = state.get("holding")
-                    if isinstance(holding, dict) and holding.get("type") == "Food":
-                        if holding.get("food_name") == ft.food_name:
-                            if ft.can_chop and not holding.get("chopped"):
-                                for pos, tile in snapshot.counters.items():
-                                    if getattr(tile, "item", None) is None:
-                                        tasks.append(Task("place_for_chop", pos, 60, {"food": ft}))
-                            elif ft.can_cook and holding.get("cooked_stage") == 0:
-                                if ft.can_chop and not holding.get("chopped"):
-                                    continue
-                                for pos, tile in snapshot.cookers.items():
-                                    pan = getattr(tile, "item", None)
-                                    if isinstance(pan, Pan) and pan.food is None:
-                                        tasks.append(Task("place_in_cooker", pos, 70, {"food": ft}))
-                            else:
-                                if plate_pos is not None:
-                                    tasks.append(Task("add_food_to_plate", plate_pos, 80, {"mode": "holding_food"}))
-
-                # Check counters for this ingredient
-                for pos, tile in snapshot.counters.items():
-                    item = getattr(tile, "item", None)
-                    if isinstance(item, Food) and item.food_name == ft.food_name:
-                        if ft.can_chop and not item.chopped:
-                            tasks.append(Task("chop", pos, 60, {"food": ft}))
-                        elif ft.can_cook and item.cooked_stage == 0:
-                            tasks.append(Task("pickup_food", pos, 65, {"reason": "cook"}))
-                        elif self._food_matches_requirement(item, ft):
-                            tasks.append(Task("pickup_food", pos, 65, {"reason": "plate"}))
-
-                # If no staged item, buy
-                for pos in snapshot.shops:
-                    tasks.append(Task("buy_food", pos, 40, {"food": ft}))
-
-        # Wash dishes opportunistically (low priority)
-        for pos, tile in snapshot.sinks.items():
-            if getattr(tile, "num_dirty_plates", 0) > 0:
-                tasks.append(Task("wash_sink", pos, 10, {}))
-
-        return tasks
-
-    # ----------------------------
-    # Pathing helpers
-    # ----------------------------
-    def _adjacent_distance(self, bx: int, by: int, tx: int, ty: int) -> int:
-        return max(abs(bx - tx), abs(by - ty)) - 1
-
-    def _next_step(self, start: Tuple[int, int], target: Tuple[int, int], blocked: set) -> Optional[Tuple[int, int]]:
-        if max(abs(start[0] - target[0]), abs(start[1] - target[1])) <= 1:
-            return (0, 0)
-
+    # --- DETERMINISTIC PATHFINDING ---
+    def get_bfs_path(self, start: Tuple[int, int], target_x: int, target_y: int, blocked_tiles: set) -> Optional[Tuple[int, int]]:
         queue = deque([(start, None)])
         visited = {start}
         w, h = self.map.width, self.map.height
 
         while queue:
-            (cx, cy), first = queue.popleft()
-            if max(abs(cx - target[0]), abs(cy - target[1])) <= 1:
-                return first if first is not None else (0, 0)
+            (cx, cy), first_step = queue.popleft()
+            if max(abs(cx - target_x), abs(cy - target_y)) <= 1:
+                return first_step if first_step else (0, 0)
 
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    if dx == 0 and dy == 0:
-                        continue
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx == 0 and dy == 0: continue
                     nx, ny = cx + dx, cy + dy
-                    if not (0 <= nx < w and 0 <= ny < h):
-                        continue
-                    if (nx, ny) in visited:
-                        continue
-                    if not self.map.is_tile_walkable(nx, ny):
-                        continue
-                    if first is None and (nx, ny) in blocked:
-                        continue
+                    if (nx, ny) in visited: continue
+                    if not (0 <= nx < w and 0 <= ny < h): continue
+                    if not self.map.is_tile_walkable(nx, ny): continue
+                    if (nx, ny) in blocked_tiles: continue
+                    
                     visited.add((nx, ny))
-                    new_first = first if first is not None else (dx, dy)
+                    new_first = first_step if first_step else (dx, dy)
                     queue.append(((nx, ny), new_first))
         return None
 
-    # ----------------------------
-    # Task assignment and execution
-    # ----------------------------
-    def _task_feasible(self, snapshot: Snapshot, bot_state: Dict[str, Any], task: Task) -> bool:
-        holding = bot_state.get("holding")
-        if task.kind == "buy_plate":
-            return holding is None and snapshot.money >= ShopCosts.PLATE.buy_cost
-        if task.kind == "take_clean_plate":
-            return holding is None
-        if task.kind == "buy_food":
-            ft = task.meta.get("food")
-            return holding is None and ft is not None and snapshot.money >= ft.buy_cost
-        if task.kind == "place_for_chop":
-            return holding is not None and holding.get("type") == "Food"
-        if task.kind == "chop":
-            return holding is None
-        if task.kind == "pickup_food":
-            return holding is None
-        if task.kind == "place_in_cooker":
-            return holding is not None and holding.get("type") == "Food"
-        if task.kind == "take_from_pan":
-            return holding is None
-        if task.kind == "add_food_to_plate":
-            if task.meta.get("mode") == "holding_food":
-                return holding is not None and holding.get("type") == "Food"
-            return holding is not None and holding.get("type") == "Plate" and not holding.get("dirty")
-        if task.kind == "place_plate":
-            return holding is not None and holding.get("type") == "Plate" and not holding.get("dirty")
-        if task.kind == "pickup_plate":
-            return holding is None
-        if task.kind == "submit":
-            return holding is not None and holding.get("type") == "Plate" and not holding.get("dirty")
-        if task.kind == "trash":
-            return holding is not None
-        if task.kind == "wash_sink":
+    def move_towards(self, controller: RobotController, bot_id: int, target_x: int, target_y: int) -> bool:
+        bx, by = self.current_positions[bot_id]
+
+        if max(abs(bx - target_x), abs(by - target_y)) <= 1:
+            self.future_positions[bot_id] = (bx, by)
             return True
+
+        blocked = set()
+        for other_id, pos in self.future_positions.items():
+            if other_id != bot_id: blocked.add(pos)
+        
+        for other_id, pos in self.current_positions.items():
+             if other_id != bot_id and other_id not in self.future_positions:
+                 blocked.add(pos)
+
+        step = self.get_bfs_path((bx, by), target_x, target_y, blocked)
+        
+        if step and step != (0, 0):
+            if controller.move(bot_id, step[0], step[1]):
+                self.future_positions[bot_id] = (bx + step[0], by + step[1])
+                return False 
+        
+        self.future_positions[bot_id] = (bx, by)
         return False
 
-    def _task_score(self, snapshot: Snapshot, bot_state: Dict[str, Any], task: Task) -> int:
-        if not self._task_feasible(snapshot, bot_state, task):
-            return -10**9
-        bx, by = bot_state["x"], bot_state["y"]
-        dist = self._adjacent_distance(bx, by, task.target[0], task.target[1])
-        dist = max(0, dist)
-        score = task.priority * 100 - dist
-        last = self.last_tasks.get(bot_state["bot_id"])
-        if last and last[0] == task.kind and last[1] == task.target:
-            score += 25
-        return score
+    def get_best_counter(self, controller: RobotController, bot_id: int, require_empty: bool = True) -> Optional[Tuple[int, int]]:
+        bx, by = self.current_positions[bot_id]
+        team = controller.get_team()
+        valid = []
+        for cx, cy in self.locations.get("COUNTER", []):
+            if require_empty:
+                tile = controller.get_tile(team, cx, cy)
+                if tile and getattr(tile, 'item', None) is None:
+                    valid.append((cx, cy))
+            else:
+                valid.append((cx, cy))
+        return min(valid, key=lambda p: abs(p[0]-bx) + abs(p[1]-by)) if valid else None
 
-    def _assign_tasks(self, snapshot: Snapshot, tasks: List[Task], bot_ids: List[int]) -> Dict[int, Task]:
-        assigned: Dict[int, Task] = {}
-        reserved_targets = set()
-
-        candidates: List[Tuple[int, int, Task]] = []
-        for bot_id in bot_ids:
-            state = snapshot.bots.get(bot_id)
-            if not state:
-                continue
-            for task in tasks:
-                score = self._task_score(snapshot, state, task)
-                if score > -10**8:
-                    candidates.append((score, bot_id, task))
-
-        candidates.sort(key=lambda t: t[0], reverse=True)
-
-        for score, bot_id, task in candidates:
-            if bot_id in assigned:
-                continue
-            if task.target in reserved_targets and task.kind not in {"trash", "wash_sink"}:
-                continue
-            assigned[bot_id] = task
-            reserved_targets.add(task.target)
-            if len(assigned) == len(bot_ids):
-                break
-
-        self.last_tasks = {bid: (task.kind, task.target) for bid, task in assigned.items()}
-        return assigned
-
-    def _execute_task(
-        self,
-        controller: RobotController,
-        snapshot: Snapshot,
-        bot_id: int,
-        task: Task,
-        blocked: set,
-        planned_positions: Dict[int, Tuple[int, int]],
-    ) -> None:
-        state = snapshot.bots.get(bot_id)
-        if not state:
-            return
-        bx, by = state["x"], state["y"]
-        tx, ty = task.target
-
-        adjacent = max(abs(bx - tx), abs(by - ty)) <= 1
-        if adjacent:
-            if task.kind == "buy_plate":
-                controller.buy(bot_id, ShopCosts.PLATE, tx, ty)
-                return
-            if task.kind == "take_clean_plate":
-                controller.take_clean_plate(bot_id, tx, ty)
-                return
-            if task.kind == "buy_food":
-                controller.buy(bot_id, task.meta["food"], tx, ty)
-                return
-            if task.kind == "place_for_chop":
-                controller.place(bot_id, tx, ty)
-                return
-            if task.kind == "chop":
-                controller.chop(bot_id, tx, ty)
-                return
-            if task.kind == "pickup_food":
-                controller.pickup(bot_id, tx, ty)
-                return
-            if task.kind == "place_in_cooker":
-                controller.place(bot_id, tx, ty)
-                return
-            if task.kind == "take_from_pan":
-                controller.take_from_pan(bot_id, tx, ty)
-                return
-            if task.kind == "add_food_to_plate":
-                controller.add_food_to_plate(bot_id, tx, ty)
-                return
-            if task.kind == "place_plate":
-                controller.place(bot_id, tx, ty)
-                return
-            if task.kind == "pickup_plate":
-                controller.pickup(bot_id, tx, ty)
-                return
-            if task.kind == "submit":
-                controller.submit(bot_id, tx, ty)
-                return
-            if task.kind == "trash":
-                controller.trash(bot_id, tx, ty)
-                return
-            if task.kind == "wash_sink":
-                controller.wash_sink(bot_id, tx, ty)
-                return
-
-        step = self._next_step((bx, by), (tx, ty), blocked)
-        if step and step != (0, 0):
-            success = controller.move(bot_id, step[0], step[1])
-            if success:
-                planned_positions[bot_id] = (bx + step[0], by + step[1])
-
-    def _idle_target(self, snapshot: Snapshot, bot_state: Dict[str, Any]) -> Optional[Tuple[int, int]]:
-        critical = set(snapshot.shops + snapshot.submits + list(snapshot.cookers.keys()))
-        start = (bot_state["x"], bot_state["y"])
-        w, h = self.map.width, self.map.height
-
-        queue = deque([start])
-        visited = {start}
-        while queue:
-            cx, cy = queue.popleft()
-            if self.map.is_tile_walkable(cx, cy):
-                too_close = False
-                for tx, ty in critical:
-                    if max(abs(cx - tx), abs(cy - ty)) <= 1:
-                        too_close = True
-                        break
-                if not too_close:
-                    return (cx, cy)
-
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    if dx == 0 and dy == 0:
-                        continue
-                    nx, ny = cx + dx, cy + dy
-                    if not (0 <= nx < w and 0 <= ny < h):
-                        continue
-                    if (nx, ny) in visited:
-                        continue
-                    if not self.map.is_tile_walkable(nx, ny):
-                        continue
-                    visited.add((nx, ny))
-                    queue.append((nx, ny))
+    # Helpers
+    def get_food_type_by_name(self, name: str) -> Optional[FoodType]:
+        for ft in FoodType:
+            if ft.food_name == name: return ft
         return None
 
-    # ----------------------------
-    # Main entry
-    # ----------------------------
+    def find_plate_counter(self, controller: RobotController, bot_id: int) -> Optional[Tuple[int, int]]:
+        bx, by = self.current_positions[bot_id]
+        team = controller.get_team()
+        best_loc = None
+        best_dist = float('inf')
+        for cx, cy in self.locations.get("COUNTER", []):
+            tile = controller.get_tile(team, cx, cy)
+            item = getattr(tile, 'item', None)
+            if isinstance(item, Plate):
+                dist = abs(cx - bx) + abs(cy - by)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_loc = (cx, cy)
+        return best_loc
+
+    def get_idle_tile(self, controller: RobotController, bot_id: int) -> Optional[Tuple[int, int]]:
+        if self.cached_idle_loc: return self.cached_idle_loc
+        team = controller.get_team()
+        critical = set(filter(None, [self.shop_loc, self.cooker_loc, self.submit_loc]))
+        for x in range(self.map.width):
+            for y in range(self.map.height):
+                tile = controller.get_tile(team, x, y)
+                if not tile or not tile.is_walkable: continue
+                if any(max(abs(x - cx), abs(y - cy)) <= 1 for cx, cy in critical): continue
+                self.cached_idle_loc = (x, y)
+                return (x, y)
+        return None
+
+    def find_counter_food(self, controller: RobotController, bot_id: int, food_type: FoodType, require_chopped: bool) -> Optional[Tuple[int, int]]:
+        bx, by = self.current_positions[bot_id]
+        team = controller.get_team()
+        best_loc = None
+        best_dist = float('inf')
+        for cx, cy in self.locations.get("COUNTER", []):
+            tile = controller.get_tile(team, cx, cy)
+            item = getattr(tile, 'item', None)
+            if isinstance(item, Food) and item.food_name == food_type.food_name:
+                if require_chopped and not item.chopped: continue
+                dist = abs(cx - bx) + abs(cy - by)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_loc = (cx, cy)
+        return best_loc
+
+    def holding_is_plate(self, holding: Any) -> bool:
+        return isinstance(holding, dict) and holding.get('type') == 'Plate'
+
+    def estimate_order_cost(self, order: Dict[str, Any]) -> int:
+        total = 0
+        for food_name in order.get('required', []):
+            ft = self.get_food_type_by_name(food_name)
+            if ft: total += int(ft.buy_cost)
+        return total
+
+    def estimate_order_time(self, order: Dict[str, Any]) -> int:
+        total = 0
+        for food_name in order.get('required', []):
+            ft = self.get_food_type_by_name(food_name)
+            if not ft: continue
+            total += self.time_simple
+            if ft.can_chop: total += self.time_chop
+            if ft.can_cook: total += self.time_cook
+        return total
+
+    def order_score(self, order: Dict[str, Any], current_turn: int) -> Tuple[float, int]:
+        reward = float(order.get('reward', 0))
+        cost = float(self.estimate_order_cost(order))
+        time_est = float(self.estimate_order_time(order))
+        score = reward - (self.order_cost_weight * cost) - (self.order_time_weight * time_est)
+        time_left = max(0, order.get('expires_turn', 0) - current_turn)
+        return (score, -int(time_left))
+
+    def select_best_order(self, orders: List[Dict[str, Any]], current_turn: int) -> Optional[Dict[str, Any]]:
+        active = [o for o in orders if o.get('is_active')]
+        if not active: return None
+        return max(active, key=lambda o: self.order_score(o, current_turn))
+
+    def get_order_by_id(self, orders: List[Dict[str, Any]], order_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        if order_id is None: return None
+        for o in orders:
+            if o.get('order_id') == order_id: return o
+        return None
+
+    def is_order_expired(self, order: Optional[Dict[str, Any]], current_turn: int) -> bool:
+        if not order: return False
+        if order.get('completed_turn') is not None: return False
+        expires = order.get('expires_turn')
+        return expires is not None and current_turn > int(expires)
+    
+    def analyze_order(self, order: Dict[str, Any]) -> None:
+        if self.current_order_id == order.get('order_id'): return
+        self.current_order = order
+        self.current_order_id = order.get('order_id')
+        self.active_chop_loc = None
+        self.active_assemble_loc = None
+        self.cooked_ingredients = []
+        self.cooked_queue = []
+        self.simple_ingredients = []
+        self.chopped_ingredients = []
+        self.chop_queue = []
+        self.current_chop_ingredient = None
+        for food_name in order['required']:
+            ft = self.get_food_type_by_name(food_name)
+            if not ft: continue
+            if ft.can_cook: self.cooked_ingredients.append(ft)
+            elif ft.can_chop: self.chopped_ingredients.append(ft)
+            else: self.simple_ingredients.append(ft)
+        self.cooked_count = 0
+        self.cooked_total = len(self.cooked_ingredients)
+        self.cooked_queue = list(self.cooked_ingredients)
+        self.chop_queue = list(self.chopped_ingredients)
+
     def play_turn(self, controller: RobotController):
-        bot_ids = controller.get_team_bot_ids(controller.get_team())
-        if not bot_ids:
+        my_bots = controller.get_team_bot_ids(controller.get_team())
+        if not my_bots: return
+        current_turn = controller.get_turn()
+
+        self.future_positions = {}
+        self.current_positions = {}
+        for bid in my_bots:
+             st = controller.get_bot_state(bid)
+             self.current_positions[bid] = (st['x'], st['y'])
+
+        self.provider_bot_id = my_bots[0]
+        self.assembler_bot_id = my_bots[1] if len(my_bots) > 1 else None
+
+        if self.shop_loc is None:
+            px, py = self.current_positions[self.provider_bot_id]
+            def nearest(locs):
+                if not locs: return None
+                return min(locs, key=lambda p: abs(p[0]-px) + abs(p[1]-py))
+            self.cooker_loc = nearest(self.locations["COOKER"])
+            self.shop_loc = nearest(self.locations["SHOP"])
+            self.submit_loc = nearest(self.locations["SUBMIT"])
+            self.trash_loc = nearest(self.locations["TRASH"])
+
+        orders = controller.get_orders(controller.get_team())
+        best_order = self.select_best_order(orders, current_turn)
+        current_order_dict = self.get_order_by_id(orders, self.current_order_id)
+        current_active = bool(current_order_dict and current_order_dict.get('is_active'))
+        current_expired = self.is_order_expired(current_order_dict, current_turn)
+
+        # Logic to switch orders if current is invalid
+        if best_order is not None:
+            should_switch = False
+            if self.current_order is None:
+                should_switch = True
+            elif current_expired:
+                should_switch = True
+            elif best_order.get('order_id') != self.current_order_id:
+                if not current_active:
+                    should_switch = True
+                else:
+                    curr_score, _ = self.order_score(self.current_order, current_turn)
+                    best_score, _ = self.order_score(best_order, current_turn)
+                    if best_score > curr_score:
+                        should_switch = True
+            
+            if should_switch:
+                self.analyze_order(best_order)
+                self.provider_state = 0
+                self.assembler_state = 0
+
+        self.play_provider_bot(controller, self.provider_bot_id, current_turn)
+        if self.assembler_bot_id is not None:
+            self.play_assembler_bot(controller, self.assembler_bot_id, current_turn)
+
+    def play_provider_bot(self, controller: RobotController, bot_id: int, current_turn: int):
+        # WATCHDOG: If stuck in same state for too long, reset.
+        if self.provider_state == self.last_provider_state:
+            self.provider_state_timer += 1
+        else:
+            self.provider_state_timer = 0
+        self.last_provider_state = self.provider_state
+
+        if self.provider_state_timer > 15: # 15 turn timeout
+            self.provider_state = 100
+            self.provider_state_timer = 0
+
+        state = controller.get_bot_state(bot_id)
+        holding = state['holding']
+        team = controller.get_team()
+        money = controller.get_team_money(team)
+        
+        def stay():
+            self.future_positions[bot_id] = self.current_positions[bot_id]
+
+        def abort_order():
+            # If we are broke and stuck, drop order and reset
+            self.current_order_id = None
+            self.provider_state = 100
+            stay()
+
+        # Interruption logic
+        if self.provider_state in {30, 31, 32, 33, 34} and not self.chop_queue and self.current_chop_ingredient is None:
+            self.provider_state = 100
+            stay()
             return
 
-        snapshot = self._build_snapshot(controller, bot_ids)
-        order = self._choose_order(controller, snapshot)
-        tasks = self._build_tasks(controller, snapshot, order)
-        assignments = self._assign_tasks(snapshot, tasks, bot_ids)
+        # STATE MACHINE
+        if self.provider_state == 0:
+            if not self.cooked_ingredients:
+                if self.chop_queue:
+                    self.current_chop_ingredient = self.chop_queue[0]
+                    self.provider_state = 30
+                else:
+                    self.provider_state = 100
+                stay()
+                return
+            self.current_cooking_ingredient = self.cooked_ingredients[0]
+            if self.cooker_loc:
+                tile = controller.get_tile(team, self.cooker_loc[0], self.cooker_loc[1])
+                if tile and isinstance(tile.item, Pan):
+                    self.pan_on_cooker = True
+                    self.provider_state = 3
+                else:
+                    self.provider_state = 1
+            else:
+                self.provider_state = 100
+            stay()
 
-        # Execute tasks in bot-id order to reduce oscillation
-        planned_positions = {bid: (snapshot.bots[bid]["x"], snapshot.bots[bid]["y"]) for bid in bot_ids if bid in snapshot.bots}
-        for bot_id in sorted(bot_ids):
-            task = assignments.get(bot_id)
-            if task is None:
-                state = snapshot.bots.get(bot_id)
-                if state is None:
-                    continue
-                idle = self._idle_target(snapshot, state)
-                if idle is None:
-                    continue
-                task = Task("idle_move", idle, 0, {})
-            blocked = set(planned_positions.values()) - {planned_positions.get(bot_id)}
-            self._execute_task(controller, snapshot, bot_id, task, blocked, planned_positions)
+        elif self.provider_state == 1: # Buy Pan
+            if holding:
+                self.provider_state = 2
+                stay()
+            elif self.shop_loc:
+                if money >= ShopCosts.PAN.buy_cost:
+                    if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1]):
+                        controller.buy(bot_id, ShopCosts.PAN, self.shop_loc[0], self.shop_loc[1])
+                else:
+                    abort_order() # REPLACED "stay()" with ABORT
+            else:
+                stay()
+
+        elif self.provider_state == 2: # Place Pan
+            if self.cooker_loc:
+                if self.move_towards(controller, bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                    if controller.place(bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                        self.pan_on_cooker = True
+                        self.provider_state = 3
+            else:
+                stay()
+
+        elif self.provider_state == 3: # Buy Ingredient
+            if holding:
+                if self.current_cooking_ingredient and self.current_cooking_ingredient.can_chop:
+                    self.provider_state = 4
+                else:
+                    self.provider_state = 7
+                stay()
+            elif self.shop_loc and self.current_cooking_ingredient:
+                if money >= self.current_cooking_ingredient.buy_cost:
+                    if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1]):
+                        controller.buy(bot_id, self.current_cooking_ingredient, self.shop_loc[0], self.shop_loc[1])
+                else:
+                    abort_order() # REPLACED "stay()" with ABORT
+            else:
+                stay()
+
+        elif self.provider_state == 4: # Place for Chopping
+            if self.active_chop_loc is None:
+                self.active_chop_loc = self.get_best_counter(controller, bot_id)
+            
+            if self.active_chop_loc:
+                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                    if controller.place(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                        self.provider_state = 5
+                    else:
+                        self.active_chop_loc = None 
+            else:
+                stay()
+
+        elif self.provider_state == 5: # Chop
+            if self.active_chop_loc:
+                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                    if controller.chop(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                        self.provider_state = 6
+            else:
+                stay()
+
+        elif self.provider_state == 6: # Pickup Chopped
+            if self.active_chop_loc:
+                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                    if controller.pickup(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                        self.active_chop_loc = None 
+                        self.provider_state = 7
+            else:
+                stay()
+
+        elif self.provider_state == 7: # Place in Pan
+            if self.cooker_loc:
+                if self.move_towards(controller, bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                    if controller.place(bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                        self.provider_state = 8
+            else:
+                stay()
+
+        elif self.provider_state == 8: # Wait for cooking
+            if self.cooker_loc:
+                tile = controller.get_tile(team, self.cooker_loc[0], self.cooker_loc[1])
+                if tile and isinstance(tile.item, Pan) and tile.item.food:
+                    if tile.item.food.cooked_stage == 1:
+                        self.cooked_count += 1
+                        self.provider_state = 9
+                        stay()
+                    elif tile.item.food.cooked_stage == 2: # Burnt
+                        if self.move_towards(controller, bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                            if controller.take_from_pan(bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                                self.provider_state = 99
+                    else:
+                        idle = self.get_idle_tile(controller, bot_id)
+                        if idle: self.move_towards(controller, bot_id, idle[0], idle[1])
+                        else: stay()
+                else: stay()
+            else: stay()
+
+        elif self.provider_state == 9: # Transition
+            if self.cooker_loc:
+                tile = controller.get_tile(team, self.cooker_loc[0], self.cooker_loc[1])
+                if tile and isinstance(tile.item, Pan) and tile.item.food is None:
+                    if self.cooked_count < self.cooked_total:
+                        self.current_cooking_ingredient = self.cooked_ingredients[self.cooked_count]
+                        self.provider_state = 3
+                    else:
+                        if self.chop_queue:
+                            self.current_chop_ingredient = self.chop_queue[0]
+                            self.provider_state = 30
+                        else:
+                            self.provider_state = 100
+            stay()
+
+        elif self.provider_state == 99: # Trash
+            if self.trash_loc:
+                if self.move_towards(controller, bot_id, self.trash_loc[0], self.trash_loc[1]):
+                    if controller.trash(bot_id, self.trash_loc[0], self.trash_loc[1]):
+                        self.provider_state = 3
+            else:
+                stay()
+
+        elif self.provider_state == 100: # Idle
+            idle = self.get_idle_tile(controller, bot_id)
+            if idle: self.move_towards(controller, bot_id, idle[0], idle[1])
+            else: stay()
+
+        elif self.provider_state == 30: # Buy Chop-only
+            if holding:
+                self.provider_state = 31
+                stay()
+            elif self.shop_loc and self.current_chop_ingredient:
+                if money >= self.current_chop_ingredient.buy_cost:
+                    if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1]):
+                        controller.buy(bot_id, self.current_chop_ingredient, self.shop_loc[0], self.shop_loc[1])
+                else:
+                    abort_order() # REPLACED "stay()" with ABORT
+            else:
+                stay()
+
+        elif self.provider_state == 31: # Place Chop-only
+            if self.active_chop_loc is None:
+                self.active_chop_loc = self.get_best_counter(controller, bot_id)
+
+            if self.active_chop_loc:
+                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                    if controller.place(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                        self.provider_state = 32
+                    else:
+                        self.active_chop_loc = None
+            else:
+                stay()
+
+        elif self.provider_state == 32: # Chop
+            if self.active_chop_loc:
+                tile = controller.get_tile(team, self.active_chop_loc[0], self.active_chop_loc[1])
+                item = getattr(tile, 'item', None)
+                if not isinstance(item, Food) or not item.can_chop:
+                    self.active_chop_loc = None
+                    self.provider_state = 31 if holding else 30
+                    stay()
+                    return
+                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                    if controller.chop(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                        self.provider_state = 33
+            else:
+                stay()
+
+        elif self.provider_state == 33: # Pickup Chopped
+            if self.active_chop_loc:
+                tile = controller.get_tile(team, self.active_chop_loc[0], self.active_chop_loc[1])
+                item = getattr(tile, 'item', None)
+                if not isinstance(item, Food) or not item.chopped:
+                    self.active_chop_loc = None
+                    self.provider_state = 32
+                    stay()
+                    return
+                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                    if controller.pickup(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
+                        self.active_chop_loc = None 
+                        self.provider_state = 34
+            else:
+                stay()
+
+        elif self.provider_state == 34: # Handoff
+            target_counter = self.get_best_counter(controller, bot_id)
+            if target_counter:
+                if self.move_towards(controller, bot_id, target_counter[0], target_counter[1]):
+                    if controller.place(bot_id, target_counter[0], target_counter[1]):
+                        if self.chop_queue:
+                            self.chop_queue.pop(0)
+                        if self.chop_queue:
+                            self.current_chop_ingredient = self.chop_queue[0]
+                            self.provider_state = 30
+                        else:
+                            self.provider_state = 100
+            else:
+                stay()
+        else:
+             stay()
+
+    def play_assembler_bot(self, controller: RobotController, bot_id: int, current_turn: int):
+        state = controller.get_bot_state(bot_id)
+        holding = state['holding']
+        team = controller.get_team()
+        money = controller.get_team_money(team)
+
+        def stay():
+            self.future_positions[bot_id] = self.current_positions[bot_id]
+        
+        # Idle check
+        if self.provider_state in {3, 4, 5, 6, 7, 30, 31, 32, 33, 34} and holding is None and self.assembler_state == 0:
+            idle_tile = self.get_idle_tile(controller, bot_id)
+            if idle_tile:
+                self.move_towards(controller, bot_id, idle_tile[0], idle_tile[1])
+            else:
+                stay()
+            return
+
+        if self.assembler_state == 0: # Buy Plate
+            if holding:
+                self.assembler_state = 1
+                stay()
+            elif self.provider_state >= 7 or not self.cooked_queue:
+                if self.shop_loc and money >= ShopCosts.PLATE.buy_cost:
+                    if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1]):
+                        controller.buy(bot_id, ShopCosts.PLATE, self.shop_loc[0], self.shop_loc[1])
+                else:
+                    stay() # Plate is cheap; ok to wait? Or should we abort? 
+                           # Plates are 2 coins. If we can't afford that, we are dead anyway.
+                           # Let's just wait.
+            else:
+                idle_tile = self.get_idle_tile(controller, bot_id)
+                if idle_tile:
+                    self.move_towards(controller, bot_id, idle_tile[0], idle_tile[1])
+                else: stay()
+
+        elif self.assembler_state == 1: # Place Plate
+            if not self.holding_is_plate(holding):
+                self.assembler_state = 0
+                stay()
+                return
+            
+            if self.active_assemble_loc is None:
+                self.active_assemble_loc = self.get_best_counter(controller, bot_id, require_empty=True)
+
+            if self.active_assemble_loc:
+                if self.move_towards(controller, bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
+                    if controller.place(bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
+                        if self.cooked_queue:
+                            self.assembler_state = 2
+                        else:
+                            self.assembler_state = 4
+                    else:
+                        self.active_assemble_loc = None 
+            else:
+                stay()
+
+        elif self.assembler_state == 2: # Get Cooked
+            if not self.cooked_queue:
+                self.assembler_state = 4
+                stay()
+                return
+            
+            if not self.active_assemble_loc:
+                 self.active_assemble_loc = self.find_plate_counter(controller, bot_id)
+            
+            if holding:
+                self.assembler_state = 3
+                stay()
+                return
+
+            if self.cooker_loc:
+                if self.move_towards(controller, bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                    tile = controller.get_tile(team, self.cooker_loc[0], self.cooker_loc[1])
+                    if tile and isinstance(tile.item, Pan) and tile.item.food:
+                        if tile.item.food.cooked_stage == 1:
+                            if controller.take_from_pan(bot_id, self.cooker_loc[0], self.cooker_loc[1]):
+                                self.assembler_state = 3
+            else:
+                stay()
+
+        elif self.assembler_state == 3: # Add to plate
+            if self.active_assemble_loc:
+                if self.move_towards(controller, bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
+                    if controller.add_food_to_plate(bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
+                        if self.cooked_queue:
+                            self.cooked_queue.pop(0)
+                        if self.cooked_queue:
+                            self.assembler_state = 2
+                        else:
+                            self.assembler_state = 4
+            else:
+                stay()
+
+        elif self.assembler_state == 4: # Add simple
+            target_ing = None
+            if self.simple_ingredients:
+                target_ing = self.simple_ingredients[0]
+            elif self.chopped_ingredients:
+                target_ing = self.chopped_ingredients[0]
+            
+            if not target_ing:
+                self.assembler_state = 5 
+                stay()
+                return
+
+            if holding:
+                if self.active_assemble_loc:
+                    if self.move_towards(controller, bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
+                        if controller.add_food_to_plate(bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
+                            if self.simple_ingredients: self.simple_ingredients.pop(0)
+                            elif self.chopped_ingredients: self.chopped_ingredients.pop(0)
+                else: stay()
+            else:
+                found_loc = self.find_counter_food(controller, bot_id, target_ing, target_ing.can_chop)
+                if found_loc:
+                    if self.move_towards(controller, bot_id, found_loc[0], found_loc[1]):
+                        controller.pickup(bot_id, found_loc[0], found_loc[1])
+                elif self.shop_loc and not target_ing.can_chop and money >= target_ing.buy_cost:
+                     if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1]):
+                        controller.buy(bot_id, target_ing, self.shop_loc[0], self.shop_loc[1])
+                else:
+                    stay() # Here we might also want to abort, but simple ingredients are cheap.
+
+        elif self.assembler_state == 5: # Submit
+            if holding and self.holding_is_plate(holding):
+                if self.submit_loc:
+                    if self.move_towards(controller, bot_id, self.submit_loc[0], self.submit_loc[1]):
+                        if controller.submit(bot_id, self.submit_loc[0], self.submit_loc[1]):
+                            self.assembler_state = 0
+                else: stay()
+            else:
+                if self.active_assemble_loc:
+                     if self.move_towards(controller, bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
+                        controller.pickup(bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1])
+                else: stay()
+        else:
+            stay()
