@@ -318,7 +318,7 @@ class BotPlayer:
         team = controller.get_team()
         money = controller.get_team_money(team)
 
-        # State 0: Buy plate
+        # State 0: Buy plate - wait for provider to be cooking before starting
         if self.assembler_state == 0:
             orders = controller.get_orders(team)
             if not any(o['is_active'] for o in orders):
@@ -330,7 +330,7 @@ class BotPlayer:
                     if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1], current_turn):
                         controller.buy(bot_id, ShopCosts.PLATE, self.shop_loc[0], self.shop_loc[1])
 
-        # State 1: Place plate
+        # State 1: Place plate - wait for provider to finish cooking
         elif self.assembler_state == 1:
             if self.provider_state < 8 and self.cooked_ingredients:
                 return
@@ -339,11 +339,13 @@ class BotPlayer:
                 if tile and getattr(tile, 'item', None) is None:
                     if self.move_towards(controller, bot_id, self.assembly_counter[0], self.assembly_counter[1], current_turn):
                         if controller.place(bot_id, self.assembly_counter[0], self.assembly_counter[1]):
-                            # Prioritize cooked ingredients (they can burn!)
+                            # Get cooked ingredients first (they can burn!)
                             if self.cooked_ingredients:
-                                self.assembler_state = 2  # Get cooked first
+                                self.assembler_state = 2
+                            elif self.simple_ingredients:
+                                self.assembler_state = 4
                             else:
-                                self.assembler_state = 4  # Just simple ingredients
+                                self.assembler_state = 5
 
         # State 2: Get cooked ingredient from pan (do this first - it can burn!)
         elif self.assembler_state == 2:
@@ -365,8 +367,10 @@ class BotPlayer:
                         self.cooked_ingredients.pop(0)
                         if self.cooked_ingredients:
                             self.assembler_state = 2  # More cooked to get
+                        elif self.simple_ingredients:
+                            self.assembler_state = 4  # Now get simple
                         else:
-                            self.assembler_state = 4  # Move to simple
+                            self.assembler_state = 5  # Done, pick up plate
 
         # State 4: Add simple ingredients
         elif self.assembler_state == 4:
