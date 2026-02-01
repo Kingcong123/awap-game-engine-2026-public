@@ -422,10 +422,36 @@ class BotPlayer:
         return None
 
     def is_order_expired(self, order: Optional[Dict[str, Any]], current_turn: int) -> bool:
+        """Check if order has expired (can no longer be submitted)."""
         if not order: return False
         if order.get('completed_turn') is not None: return False
         expires = order.get('expires_turn')
+        # Game's is_active is: created_turn <= turn <= expires_turn
+        # So order is still active ON the expiration turn, only expired AFTER
         return expires is not None and current_turn > int(expires)
+    
+    def should_continue_order(self, current_turn: int) -> bool:
+        """Check if we should continue working on current order (not expired, enough time)."""
+        if self.current_order is None:
+            return False
+        expires = self.current_order.get('expires_turn')
+        if expires is None:
+            return True
+        
+        turns_left = int(expires) - current_turn
+        
+        # Game allows submissions on the expiration turn (is_active includes it)
+        # So we should work as long as turns_left >= 0
+        # For complex orders, we need a buffer since they take longer
+        if self.cooked_total == 0 and not self.chop_queue:
+            # Simple order - can complete quickly, work until expired
+            return turns_left >= 0
+        elif self.cooked_total == 0:
+            # Chopping but no cooking - need a bit more time
+            return turns_left >= 0
+        else:
+            # Has cooking - need more time buffer since cooking takes 20 ticks
+            return turns_left >= 0
     
     def can_switch_orders(self) -> bool:
         """Check if it's safe to switch orders without wasting work."""
@@ -477,7 +503,38 @@ class BotPlayer:
 
     def has_work_to_do(self) -> bool:
         """Check if there's any work remaining for the current order."""
-        return bool(self.cooked_queue or self.chop_queue or self.simple_queue or self.chopped_queue)
+        # Check if there are items still to process in queues
+        if self.cooked_queue or self.chop_queue or self.simple_queue or self.chopped_queue:
+            return True
+        # Check if there are cooked items that still need to be plated
+        # (cooked_queue is emptied when cooking finishes, but assembler still needs to plate)
+        if self.cooked_added_to_plate < self.cooked_total:
+            return True
+        return False
+
+    def _clear_current_order(self) -> None:
+        """Clear current order and all related state - called when order expires or is completed."""
+        self.current_order = None
+        self.current_order_id = None
+        self.cooked_queue = []
+        self.chop_queue = []
+        self.simple_queue = []
+        self.chopped_queue = []
+        self.cooked_count = 0
+        self.cooked_total = 0
+        self.cooked_added_to_plate = 0
+        self.items_on_plate = 0
+        self.current_chop_ingredient = None
+        self.current_cooking_ingredient = None
+        self.active_chop_loc = None
+        self.active_assemble_loc = None
+        self.pipeline_state = 0
+        self.pipeline_chop_loc = None
+        self.pipeline_ingredient = None
+        self.pipeline_queue = []
+        # Set bots to idle
+        self.provider_state = 100
+        self.assembler_state = 0
 
     def get_total_items_needed(self) -> int:
         """Get total number of items needed for the current order."""
@@ -515,19 +572,30 @@ class BotPlayer:
         current_active = bool(current_order_dict and current_order_dict.get('is_active'))
         current_expired = self.is_order_expired(current_order_dict, current_turn)
 
-        if best_order is not None:
+        # FIRST: Check if current order is no longer valid (expired or inactive)
+        current_order_invalid = (self.current_order is not None and 
+                                  (current_expired or not current_active))
+        
+        if current_order_invalid:
+            # Current order expired or became inactive - must stop working on it
+            if best_order is not None:
+                # Switch to new order
+                self.analyze_order(best_order)
+                self.provider_state = 0
+                self.assembler_state = 0
+            else:
+                # No orders available - clear current order and go idle
+                self._clear_current_order()
+        elif best_order is not None:
+            # Current order still valid, check if we should switch to a better one
             should_switch = False
             if self.current_order is None:
                 should_switch = True
-            elif current_expired:
-                should_switch = True
             elif best_order.get('order_id') != self.current_order_id:
-                if not current_active:
-                    should_switch = True
-                elif self.can_switch_orders():
+                if self.can_switch_orders():
                     curr_score = self.order_score(self.current_order, current_turn)
                     best_score = self.order_score(best_order, current_turn)
-                    if best_score > curr_score * 1.5:  # Higher threshold to avoid switching
+                    if best_score > curr_score * 1.5:
                         should_switch = True
             
             if should_switch:
@@ -558,6 +626,14 @@ class BotPlayer:
         
         def stay():
             self.future_positions[bot_id] = self.current_positions[bot_id]
+        
+        # Check if order is still valid before doing any buying
+        order_valid = self.should_continue_order(current_turn)
+        if not order_valid and self.provider_state not in {100, 99}:
+            # Order expired or about to expire - go idle
+            # If holding something, go to state 100 which will handle it
+            self.provider_state = 100
+            self.active_chop_loc = None
 
         def abort_order():
             self.current_order_id = None
@@ -813,9 +889,18 @@ class BotPlayer:
                 stay()
 
         elif self.provider_state == 100: # Idle
-            idle = self.get_idle_tile(controller, bot_id)
-            if idle: self.move_towards(controller, bot_id, idle[0], idle[1])
-            else: stay()
+            if holding:
+                # Place held item on counter before going idle
+                target_counter = self.get_best_counter(controller, bot_id)
+                if target_counter:
+                    if self.move_towards(controller, bot_id, target_counter[0], target_counter[1]):
+                        controller.place(bot_id, target_counter[0], target_counter[1])
+                else:
+                    stay()
+            else:
+                idle = self.get_idle_tile(controller, bot_id)
+                if idle: self.move_towards(controller, bot_id, idle[0], idle[1])
+                else: stay()
 
         elif self.provider_state == 30: # Get Chop-only ingredient
             if not self.current_chop_ingredient:
@@ -1008,6 +1093,26 @@ class BotPlayer:
         def stay():
             self.future_positions[bot_id] = self.current_positions[bot_id]
         
+        # Check if order is still valid
+        order_valid = self.should_continue_order(current_turn)
+        if not order_valid and self.assembler_state != 0:
+            # Order expired - trash what we're holding and reset
+            if holding:
+                if self.trash_loc:
+                    if self.move_towards(controller, bot_id, self.trash_loc[0], self.trash_loc[1]):
+                        controller.trash(bot_id, self.trash_loc[0], self.trash_loc[1])
+                    return
+                else:
+                    target = self.get_best_counter(controller, bot_id)
+                    if target:
+                        if self.move_towards(controller, bot_id, target[0], target[1]):
+                            controller.place(bot_id, target[0], target[1])
+                    return
+            self.assembler_state = 0
+            self.active_assemble_loc = None
+            self.items_on_plate = 0
+            self.cooked_added_to_plate = 0
+        
         def trash_held_item():
             """Trash whatever we're holding and reset to state 0."""
             if self.trash_loc:
@@ -1037,7 +1142,7 @@ class BotPlayer:
                 return
             
             # Not holding anything
-            if ready_for_plate and self.has_work_to_do():
+            if ready_for_plate and self.has_work_to_do() and order_valid:
                 if self.shop_loc and money >= ShopCosts.PLATE.buy_cost:
                     if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1]):
                         controller.buy(bot_id, ShopCosts.PLATE, self.shop_loc[0], self.shop_loc[1])
