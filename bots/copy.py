@@ -22,12 +22,14 @@ class BotPlayer:
         # Current order tracking
         self.current_order = None
         self.current_order_id = None
+        self.order_index = 0  # Track position in sorted order list
         self.cooked_ingredients = []
         self.chop_only_ingredients = []
         self.simple_ingredients = []
-        self.cooked_count = 0  # How many cooked ingredients we've made so far
+        self.cooked_count = 0  # How many cooked ingredients provider has made so far
         self.cooked_total = 0  # Total cooked ingredients needed for this order
         self.chopped_count = 0
+        self.assembled_cooked_count = 0  # How many cooked ingredients assembler has added to plate
 
 
         # Coordination flags
@@ -52,6 +54,33 @@ class BotPlayer:
 
         self.must_move_provider = False
         self.must_move_assembler = False
+
+    def compute_order_heuristic(self, order: Dict[str, Any], controller: RobotController) -> int:
+        """
+        Compute estimated turns needed to complete an order.
+        Returns the heuristic (estimated time in turns).
+        """
+        current_turn = controller.get_turn()
+        
+        # Heuristic costs per ingredient
+        INGREDIENT_COSTS = {
+            "EGG": 20,
+            "ONIONS": 30,
+            "MEAT": 50,
+            "NOODLES": 20,
+            "SAUCE": 20,
+        }
+        
+        PLATE_AND_SUBMIT = 5  # Buy plate, assemble, submit overhead
+        
+        total_cost = PLATE_AND_SUBMIT
+        
+        # Add cost for each required ingredient
+        for food_name in order["required"]:
+            cost = INGREDIENT_COSTS.get(food_name, 20)  # Default cost if unknown ingredient
+            total_cost += cost
+        
+        return total_cost
 
     def find_important_locations(self, map_instance) -> Dict[str, List[Tuple[int, int]]]:
         locations = {
@@ -147,6 +176,7 @@ class BotPlayer:
                     self.simple_ingredients.append(ft)
         self.cooked_count = 0
         self.cooked_total = len(self.cooked_ingredients)
+        self.assembled_cooked_count = 0
 
     def play_turn(self, controller: RobotController):
         my_bots = controller.get_team_bot_ids(controller.get_team())
@@ -374,13 +404,35 @@ class BotPlayer:
         elif self.provider_state == 100:
             orders = controller.get_orders(team)
             active = [o for o in orders if o['is_active']]
+            
             if active:
-                # Check if this is a different order than what we just finished
-                new_order = active[0]
-                if new_order.get('order_id') != self.current_order_id:
-                    self.current_order_id = None  # Reset so analyze_order works
-                    self.analyze_order(new_order)
-                    self.provider_state = 0
+                # Try to find a feasible order
+                found_new_order = False
+                
+                for order in active:
+                    # Check if this is a different order than what we just finished
+                    if order.get('order_id') != self.current_order_id:
+                        # Compute heuristic for this order
+                        heuristic = self.compute_order_heuristic(order, controller)
+                        current_turn = controller.get_turn()
+                        time_remaining = order['expires_turn'] - current_turn
+                        
+                        # If we have enough time, take this order
+                        if heuristic <= time_remaining:
+                            self.current_order_id = None  # Reset so analyze_order works
+                            self.analyze_order(order)
+                            self.provider_state = 0
+                            found_new_order = True
+                            break
+                        else:
+                            # Not enough time, move to next order
+                            pass
+                
+                # If no feasible order found, just idle
+                if not found_new_order:
+                    if self.must_move_provider:
+                        print("moving provider")
+                        controller.move(bot_id, random.choice([-1, 1]), random.choice([-1, 1]))
             else:
                 if self.must_move_provider:
                     print("moving provider")
@@ -397,14 +449,14 @@ class BotPlayer:
         # State 0: Buy plate
         if self.assembler_state == 0:
             orders = controller.get_orders(team)
-            if not any(o['is_active'] for o in orders):
+            if not orders:
                 if self.must_move_assembler:
                     print("moving assembler")
                     controller.move(bot_id, random.choice([-1, 1]), random.choice([-1, 1]))
                 return
             if holding:
                 self.assembler_state = 1
-            elif self.provider_state >= 7 or not self.cooked_ingredients:
+            elif self.provider_state >= 7 or self.cooked_total == 0:
                 if self.shop_loc and money >= ShopCosts.PLATE.buy_cost:
                     trying_move_towards = self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1], current_turn)
                     self.must_move_provider = not trying_move_towards 
@@ -417,7 +469,7 @@ class BotPlayer:
 
         # State 1: Place plate
         elif self.assembler_state == 1:
-            if self.provider_state < 8 and self.cooked_ingredients:
+            if self.provider_state < 8 and self.cooked_total > 0:
                 return
             if self.assembly_counter:
                 tile = controller.get_tile(team, self.assembly_counter[0], self.assembly_counter[1])
@@ -427,14 +479,14 @@ class BotPlayer:
                     if trying_move_towards:
                         if controller.place(bot_id, self.assembly_counter[0], self.assembly_counter[1]):
                             # Prioritize cooked ingredients (they can burn!)
-                            if self.cooked_ingredients:
+                            if self.cooked_total > 0:
                                 self.assembler_state = 2  # Get cooked first
                             else:
                                 self.assembler_state = 4  # Just simple ingredients
 
         # State 2: Get cooked ingredient from pan (do this first - it can burn!)
         elif self.assembler_state == 2:
-            if not self.cooked_ingredients:
+            if self.assembled_cooked_count >= self.cooked_total:
                 self.assembler_state = 4  # Move to simple ingredients
             elif self.cooker_loc:
                 trying_move_towards = self.move_towards(controller, bot_id,self.cooker_loc[0], self.cooker_loc[1], current_turn)
@@ -454,16 +506,14 @@ class BotPlayer:
                 self.must_move_provider = not trying_move_towards 
                 if trying_move_towards:
                     if controller.add_food_to_plate(bot_id, self.assembly_counter[0], self.assembly_counter[1]):
-                        self.cooked_ingredients.pop(0)
-                        if self.cooked_ingredients:
-                            
+                        self.assembled_cooked_count += 1
+                        if self.assembled_cooked_count < self.cooked_total:
                             self.assembler_state = 2  # More cooked to get
                         else:
                             self.assembler_state = 4  # Move to simple
 
         # State 4: Add simple ingredients
         elif self.assembler_state == 4:
-            print("cooked_ingredients: ", self.cooked_ingredients, " order id: ", self.current_order_id)
             if holding:
                 holding_onions = (holding["food_name"] == "ONIONS")
                     
@@ -519,6 +569,7 @@ class BotPlayer:
                 if trying_move_towards:
 
                     if controller.submit(bot_id, self.submit_loc[0], self.submit_loc[1]):
+                        print("submitted order: ", self.current_order_id)
                         self.current_order = None
                         self.current_order_id = None  # Reset so we can take new orders
                         self.assembler_state = 7
@@ -527,12 +578,34 @@ class BotPlayer:
         elif self.assembler_state == 7:
             orders = controller.get_orders(team)
             active = [o for o in orders if o['is_active']]
+            
             if active:
-                self.analyze_order(active[0])
-                self.provider_state = 0  # Reset provider to start cooking for new order
-                self.assembler_state = 0
+                # Try to find a feasible order using heuristic
+                found_order = False
+                
+                for order in active:
+                    # Compute heuristic for this order
+                    heuristic = self.compute_order_heuristic(order, controller)
+                    current_turn = controller.get_turn()
+                    time_remaining = order['expires_turn'] - current_turn
+                    
+                    # If we have enough time, take this order
+                    if heuristic <= time_remaining:
+                        self.analyze_order(order)
+                        self.provider_state = 0  # Reset provider to start cooking for new order
+                        self.assembler_state = 0
+                        found_order = True
+                        break
+                    else:
+                        # Not enough time, move to next order
+                        print(f"Skipping order {order.get('order_id')}: heuristic={heuristic}, time_remaining={time_remaining}")
+                
+                # If no feasible order found, just idle
+                if not found_order:
+                    if self.must_move_assembler:
+                        print("moving assembler")
+                        controller.move(bot_id, random.choice([-1, 1]), random.choice([-1, 1]))
             else:
                 if self.must_move_assembler:
                     print("moving assembler")
                     controller.move(bot_id, random.choice([-1, 1]), random.choice([-1, 1]))
-
