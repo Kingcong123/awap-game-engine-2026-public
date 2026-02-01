@@ -66,6 +66,9 @@ class BotPlayer:
         self.time_cook = 20
         self.time_pickup_place = 2
 
+        # Lookahead configuration
+        self.lookahead_window = 50
+
         # Pipelining - completely separate state
         self.pipeline_state = 0
         self.pipeline_chop_loc = None
@@ -412,7 +415,7 @@ class BotPlayer:
         
         return max(total_turns, 1.0)
 
-    def order_score(self, order: Dict[str, Any], current_turn: int) -> float:
+    def order_score(self, order: Dict[str, Any], current_turn: int, is_future_order: bool = False) -> float:
         reward = float(order.get('reward', 0))
         bot_pos = self.current_positions.get(self.provider_bot_id, (0, 0))
         estimated_turns = self.estimate_turns_to_complete(order, bot_pos)
@@ -434,12 +437,31 @@ class BotPlayer:
         elif turns_left < estimated_turns:
             roi *= 0.1
         
+        # Apply discount for future orders based on turns until activation
+        if is_future_order:
+            created_turn = order.get('created_turn', current_turn)
+            turns_until_active = created_turn - current_turn
+            if turns_until_active > 0:
+                discount = 1.0 / (1.0 + turns_until_active * 0.01)
+                roi *= discount
+        
         return roi
 
     def select_best_order(self, orders: List[Dict[str, Any]], current_turn: int) -> Optional[Dict[str, Any]]:
         active = [o for o in orders if o.get('is_active')]
         if not active:
-            return None
+            # No active orders - check future orders within lookahead window
+            future = [o for o in orders 
+                     if o.get('created_turn', current_turn) > current_turn 
+                     and o.get('created_turn', current_turn) <= current_turn + self.lookahead_window
+                     and o.get('completed_turn') is None]
+            if not future:
+                return None
+            scored_orders = [(o, self.order_score(o, current_turn, is_future_order=True)) for o in future]
+            scored_orders.sort(key=lambda x: x[1])
+            if scored_orders[-1][1] <= 0:
+                return None
+            return scored_orders[-1][0]
         scored_orders = [(o, self.order_score(o, current_turn)) for o in active]
         scored_orders.sort(key=lambda x: x[1])
         if scored_orders[-1][1] == -9999:
