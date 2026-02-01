@@ -5,6 +5,8 @@ from game_constants import FoodType, ShopCosts
 from robot_controller import RobotController
 from item import Pan, Plate, Food
 
+import random
+
 
 class BotPlayer:
     def __init__(self, map_copy):
@@ -118,6 +120,7 @@ class BotPlayer:
         return None
 
     def analyze_order(self, order: Dict[str, Any]) -> None:
+        
         # Don't re-analyze the same order
         if self.current_order_id == order.get('order_id'):
             return
@@ -134,6 +137,41 @@ class BotPlayer:
                     self.simple_ingredients.append(ft)
         self.cooked_count = 0
         self.cooked_total = len(self.cooked_ingredients)
+
+
+    def get_idle_tile(self, controller: RobotController, bot_id: int) -> Optional[Tuple[int, int]]:
+        """
+        Find a safe, low-traffic walkable tile for idling.
+        Avoids shop, cooker, submit, and their adjacent tiles.
+        """
+        team = controller.get_team()
+
+        critical = set(filter(None, [
+            self.shop_loc,
+            self.cooker_loc,
+            self.submit_loc,
+        ]))
+
+        for x in range(self.map.width):
+            for y in range(self.map.height):
+                tile = controller.get_tile(team, x, y)
+                if not tile or not tile.is_walkable:
+                    continue
+
+                # Avoid critical tiles and their neighbors
+                too_close = False
+                for cx, cy in critical:
+                    if max(abs(x - cx), abs(y - cy)) <= 1:
+                        too_close = True
+                        break
+
+                if too_close:
+                    continue
+
+                return (x, y)
+
+        return None
+
 
     def play_turn(self, controller: RobotController):
         my_bots = controller.get_team_bot_ids(controller.get_team())
@@ -182,6 +220,7 @@ class BotPlayer:
             self.play_assembler_bot(controller, self.assembler_bot_id, current_turn)
 
     def play_provider_bot(self, controller: RobotController, bot_id: int, current_turn: int):
+        
         state = controller.get_bot_state(bot_id)
         bx, by = state['x'], state['y']
         holding = state['holding']
@@ -312,11 +351,14 @@ class BotPlayer:
                     self.provider_state = 0
 
     def play_assembler_bot(self, controller: RobotController, bot_id: int, current_turn: int):
+        
         state = controller.get_bot_state(bot_id)
         bx, by = state['x'], state['y']
         holding = state['holding']
         team = controller.get_team()
         money = controller.get_team_money(team)
+
+        
 
         # State 0: Buy plate
         if self.assembler_state == 0:
