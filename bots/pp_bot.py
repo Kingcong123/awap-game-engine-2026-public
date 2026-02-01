@@ -240,6 +240,31 @@ class BotPlayer:
         self.future_positions[bot_id] = (bx, by)
         return False
 
+    def go_to_idle_positions(self, controller: RobotController):
+        """
+        If no orders are available:
+        - Provider moves to the nearest SHOP ($) to be ready to buy.
+        - Assembler moves to the nearest SINK (S) or UTILITY (U) to be ready to wash.
+        """
+        # 1. Move Provider to the nearest SHOP
+        if self.provider_bot_id is not None:
+            shop_locs = self.locations.get("SHOP", [])
+            if shop_locs:
+                bx, by = self.current_positions[self.provider_bot_id]
+                # Find shop closest to this bot
+                best_shop = min(shop_locs, key=lambda p: abs(p[0]-bx) + abs(p[1]-by))
+                self.move_towards(controller, self.provider_bot_id, best_shop[0], best_shop[1])
+
+        # 2. Move Assembler to the nearest SINK
+        if self.assembler_bot_id is not None:
+            # Check for SINK (S) and Utilities (U) like sinks/dishwashers
+            sink_locs = self.locations.get("SINK", []) + self.locations.get("U", [])
+            if sink_locs:
+                bx, by = self.current_positions[self.assembler_bot_id]
+                # Find sink closest to this bot
+                best_sink = min(sink_locs, key=lambda p: abs(p[0]-bx) + abs(p[1]-by))
+                self.move_towards(controller, self.assembler_bot_id, best_sink[0], best_sink[1])
+
     def get_best_counter(self, controller: RobotController, bot_id: int, require_empty: bool = True) -> Optional[Tuple[int, int]]:
         bx, by = self.current_positions[bot_id]
         team = controller.get_team()
@@ -400,6 +425,9 @@ class BotPlayer:
             roi *= (1 + inventory_bonus)
         
         expires_turn = order.get('expires_turn', current_turn + 100)
+        if expires_turn < estimated_turns:
+            return -9999
+
         turns_left = max(1, expires_turn - current_turn)
         if turns_left < estimated_turns * 1.5:
             roi *= 0.8
@@ -413,7 +441,10 @@ class BotPlayer:
         if not active:
             return None
         scored_orders = [(o, self.order_score(o, current_turn)) for o in active]
-        return max(scored_orders, key=lambda x: x[1])[0]
+        scored_orders.sort(key=lambda x: x[1])
+        if scored_orders[-1][1] == -9999:
+            return None
+        return scored_orders[-1][0]
 
     def get_order_by_id(self, orders: List[Dict[str, Any]], order_id: Optional[int]) -> Optional[Dict[str, Any]]:
         if order_id is None: return None
@@ -552,7 +583,7 @@ class BotPlayer:
              self.current_positions[bid] = (st['x'], st['y'])
 
         self.provider_bot_id = my_bots[0]
-        self.assembler_bot_id = my_bots[1] if len(my_bots) > 1 else None
+        self.assembler_bot_id = my_bots[1]
 
         if self.shop_loc is None:
             px, py = self.current_positions[self.provider_bot_id]
@@ -602,7 +633,13 @@ class BotPlayer:
                 self.analyze_order(best_order)
                 self.provider_state = 0
                 self.assembler_state = 0
-
+        
+        # If we have no active order (waiting for one), go to strategic idle positions.
+        if self.current_order is None:
+            self.go_to_idle_positions(controller)
+            return
+        
+        # ... (Your existing State Machine logic calls) ...
         self.play_provider_bot(controller, self.provider_bot_id, current_turn)
         if self.assembler_bot_id is not None:
             self.play_assembler_bot(controller, self.assembler_bot_id, current_turn)
@@ -672,7 +709,7 @@ class BotPlayer:
                 self.provider_state = 100
             stay()
 
-        elif self.provider_state == 1: # Buy Pan
+        if self.provider_state == 1: # Buy Pan
             if holding:
                 self.provider_state = 2
                 stay()
@@ -1155,7 +1192,7 @@ class BotPlayer:
                 else:
                     stay()
 
-        elif self.assembler_state == 1: # Place Plate
+        if self.assembler_state == 1: # Place Plate
             if not holding:
                 self.assembler_state = 0
                 stay()
