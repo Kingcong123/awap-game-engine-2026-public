@@ -23,13 +23,9 @@ class BotPlayer:
         self.current_order = None
         self.current_order_id = None
         self.cooked_ingredients = []
-        self.cooked_queue = []
         self.simple_ingredients = []
-        self.chopped_ingredients = []
-        self.chop_queue = []
         self.cooked_count = 0
         self.cooked_total = 0
-        self.current_chop_ingredient = None
 
         # Coordination flags
         self.pan_on_cooker = False
@@ -126,13 +122,8 @@ class BotPlayer:
         return None
     
     # --- Optimization: Dynamic Counter Selection ---
-    def get_best_counter(
-        self,
-        controller: RobotController,
-        bot_id: int,
-        require_empty: bool = True,
-    ) -> Optional[Tuple[int, int]]:
-        """Finds closest counter, optionally requiring it to be empty."""
+    def get_best_counter(self, controller: RobotController, bot_id: int) -> Optional[Tuple[int, int]]:
+        """Finds closest empty counter."""
         state = controller.get_bot_state(bot_id)
         bx, by = state['x'], state['y']
         team = controller.get_team()
@@ -145,14 +136,11 @@ class BotPlayer:
         empty_counters = []
         for cx, cy in counters:
             tile = controller.get_tile(team, cx, cy)
+            # If tile has no item, it is free
             if tile and getattr(tile, 'item', None) is None:
                 empty_counters.append((cx, cy))
-
-        if require_empty:
-            if not empty_counters:
-                return None
-            return min(empty_counters, key=lambda p: abs(p[0]-bx) + abs(p[1]-by))
-
+        
+        # If all counters are full, fallback to closest (we might need to pick up our own item)
         targets = empty_counters if empty_counters else counters
         return min(targets, key=lambda p: abs(p[0]-bx) + abs(p[1]-by))
 
@@ -164,11 +152,8 @@ class BotPlayer:
         self.current_order_id = order.get('order_id')
 
         self.cooked_ingredients = []
-        self.cooked_queue = []
+        self.chop_only_ingredients = []
         self.simple_ingredients = []
-        self.chopped_ingredients = []
-        self.chop_queue = []
-        self.current_chop_ingredient = None
 
         for food_name in order['required']:
             ft = self.get_food_type_by_name(food_name)
@@ -178,14 +163,12 @@ class BotPlayer:
             if ft.can_cook:
                 self.cooked_ingredients.append(ft)
             elif ft.can_chop:
-                self.chopped_ingredients.append(ft)
+                self.chop_only_ingredients.append(ft)
             else:
                 self.simple_ingredients.append(ft)
 
         self.cooked_count = 0
         self.cooked_total = len(self.cooked_ingredients)
-        self.cooked_queue = list(self.cooked_ingredients)
-        self.chop_queue = list(self.chopped_ingredients)
 
     def get_idle_tile(self, controller: RobotController, bot_id: int) -> Optional[Tuple[int, int]]:
         """
@@ -219,34 +202,6 @@ class BotPlayer:
                 return (x, y)
 
         return None
-
-    def find_counter_food(
-        self,
-        controller: RobotController,
-        bot_id: int,
-        food_type: FoodType,
-        require_chopped: bool,
-    ) -> Optional[Tuple[int, int]]:
-        state = controller.get_bot_state(bot_id)
-        bx, by = state['x'], state['y']
-        team = controller.get_team()
-
-        best_loc = None
-        best_dist = None
-        for cx, cy in self.locations.get("COUNTER", []):
-            tile = controller.get_tile(team, cx, cy)
-            item = getattr(tile, 'item', None)
-            if not isinstance(item, Food):
-                continue
-            if item.food_name != food_type.food_name:
-                continue
-            if require_chopped and not item.chopped:
-                continue
-            dist = abs(cx - bx) + abs(cy - by)
-            if best_dist is None or dist < best_dist:
-                best_dist = dist
-                best_loc = (cx, cy)
-        return best_loc
 
     def play_turn(self, controller: RobotController):
         my_bots = controller.get_team_bot_ids(controller.get_team())
@@ -299,11 +254,7 @@ class BotPlayer:
         # State 0: Init
         if self.provider_state == 0:
             if not self.cooked_ingredients:
-                if self.chop_queue:
-                    self.current_chop_ingredient = self.chop_queue[0]
-                    self.provider_state = 30
-                else:
-                    self.provider_state = 100
+                self.provider_state = 100
                 return
             self.current_cooking_ingredient = self.cooked_ingredients[0]
             if self.cooker_loc:
@@ -401,12 +352,8 @@ class BotPlayer:
                         self.current_cooking_ingredient = self.cooked_ingredients[self.cooked_count]
                         self.provider_state = 3  # Go buy next ingredient
                     else:
-                        # All cooked ingredients done, move to chop-only if needed
-                        if self.chop_queue:
-                            self.current_chop_ingredient = self.chop_queue[0]
-                            self.provider_state = 30
-                        else:
-                            self.provider_state = 100
+                        # All cooked ingredients done, wait for next order
+                        self.provider_state = 100
 
         # State 99: Trash
         elif self.provider_state == 99:
@@ -427,56 +374,9 @@ class BotPlayer:
                     self.analyze_order(new_order)
                     self.provider_state = 0
 
-        # State 30: Buy chop-only ingredient
-        elif self.provider_state == 30:
-            if holding:
-                self.provider_state = 31
-            elif self.shop_loc and self.current_chop_ingredient:
-                if money >= self.current_chop_ingredient.buy_cost:
-                    if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1], current_turn):
-                        controller.buy(bot_id, self.current_chop_ingredient, self.shop_loc[0], self.shop_loc[1])
-
-        # State 31: Place for chopping (DYNAMIC)
-        elif self.provider_state == 31:
-            target_counter = self.get_best_counter(controller, bot_id)
-            if target_counter:
-                if self.move_towards(controller, bot_id, target_counter[0], target_counter[1], current_turn):
-                    if controller.place(bot_id, target_counter[0], target_counter[1]):
-                        self.active_chop_loc = target_counter
-                        self.provider_state = 32
-
-        # State 32: Chop (DYNAMIC)
-        elif self.provider_state == 32:
-            if self.active_chop_loc:
-                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1], current_turn):
-                    if controller.chop(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
-                        self.provider_state = 33
-
-        # State 33: Pick up chopped (DYNAMIC)
-        elif self.provider_state == 33:
-            if self.active_chop_loc:
-                if self.move_towards(controller, bot_id, self.active_chop_loc[0], self.active_chop_loc[1], current_turn):
-                    if controller.pickup(bot_id, self.active_chop_loc[0], self.active_chop_loc[1]):
-                        self.provider_state = 34
-
-        # State 34: Place chopped for assembler (DYNAMIC)
-        elif self.provider_state == 34:
-            target_counter = self.get_best_counter(controller, bot_id)
-            if target_counter:
-                if self.move_towards(controller, bot_id, target_counter[0], target_counter[1], current_turn):
-                    if controller.place(bot_id, target_counter[0], target_counter[1]):
-                        if self.chop_queue:
-                            self.chop_queue.pop(0)
-                        self.active_chop_loc = None
-                        if self.chop_queue:
-                            self.current_chop_ingredient = self.chop_queue[0]
-                            self.provider_state = 30
-                        else:
-                            self.provider_state = 100
-
     def play_assembler_bot(self, controller: RobotController, bot_id: int, current_turn: int):
          # If provider is actively working, assembler should get out of the way
-        if self.provider_state in {3, 4, 5, 6, 7, 30, 31, 32, 33, 34}:
+        if self.provider_state in {3, 4, 5, 6, 7}:
             idle_tile = self.get_idle_tile(controller, bot_id)
             if idle_tile:
                 self.move_towards(
@@ -501,14 +401,14 @@ class BotPlayer:
                 return
             if holding:
                 self.assembler_state = 1
-            elif self.provider_state >= 7 or not self.cooked_queue:
+            elif self.provider_state >= 7 or not self.cooked_ingredients:
                 if self.shop_loc and money >= ShopCosts.PLATE.buy_cost:
                     if self.move_towards(controller, bot_id, self.shop_loc[0], self.shop_loc[1], current_turn):
                         controller.buy(bot_id, ShopCosts.PLATE, self.shop_loc[0], self.shop_loc[1])
 
         # State 1: Place plate (DYNAMIC)
         elif self.assembler_state == 1:
-            if self.provider_state < 8 and self.cooked_queue:
+            if self.provider_state < 8 and self.cooked_ingredients:
                 return
             
             target = self.get_best_counter(controller, bot_id)
@@ -517,24 +417,15 @@ class BotPlayer:
                     if controller.place(bot_id, target[0], target[1]):
                         self.active_assemble_loc = target
                         # Prioritize cooked ingredients
-                        if self.cooked_queue:
+                        if self.cooked_ingredients:
                             self.assembler_state = 2
                         else:
                             self.assembler_state = 4
 
         # State 2: Get cooked ingredient from pan
         elif self.assembler_state == 2:
-            if not self.cooked_queue:
+            if not self.cooked_ingredients:
                 self.assembler_state = 4
-            elif isinstance(holding, Plate):
-                if self.active_assemble_loc is None:
-                    self.active_assemble_loc = self.get_best_counter(controller, bot_id)
-                if self.active_assemble_loc:
-                    tile = controller.get_tile(team, self.active_assemble_loc[0], self.active_assemble_loc[1])
-                    if tile and getattr(tile, 'item', None) is None:
-                        if self.move_towards(controller, bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1], current_turn):
-                            if controller.place(bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
-                                return
             elif self.cooker_loc:
                 if self.move_towards(controller, bot_id, self.cooker_loc[0], self.cooker_loc[1], current_turn):
                     tile = controller.get_tile(team, self.cooker_loc[0], self.cooker_loc[1])
@@ -548,30 +439,15 @@ class BotPlayer:
             if self.active_assemble_loc:
                 if self.move_towards(controller, bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1], current_turn):
                     if controller.add_food_to_plate(bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
-                        if self.cooked_queue:
-                            self.cooked_queue.pop(0)
-                        if self.cooked_queue:
+                        self.cooked_ingredients.pop(0)
+                        if self.cooked_ingredients:
                             self.assembler_state = 2
                         else:
                             self.assembler_state = 4
 
         # State 4: Add simple ingredients (DYNAMIC)
         elif self.assembler_state == 4:
-            if self.chopped_ingredients:
-                ingredient = self.chopped_ingredients[0]
-                if holding:
-                    if self.active_assemble_loc:
-                        if self.move_towards(controller, bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1], current_turn):
-                            if controller.add_food_to_plate(bot_id, self.active_assemble_loc[0], self.active_assemble_loc[1]):
-                                self.chopped_ingredients.pop(0)
-                else:
-                    chopped_loc = self.find_counter_food(controller, bot_id, ingredient, True)
-                    if chopped_loc:
-                        if self.move_towards(controller, bot_id, chopped_loc[0], chopped_loc[1], current_turn):
-                            controller.pickup(bot_id, chopped_loc[0], chopped_loc[1])
-                    else:
-                        return
-            elif self.simple_ingredients:
+            if self.simple_ingredients:
                 ingredient = self.simple_ingredients[0]
                 if holding:
                     if self.active_assemble_loc:
